@@ -44,10 +44,18 @@ type Model struct {
 	TotalElems   uint64 // sum of tensor elements when the header lists tensors
 	ExpertElems  uint64 // elements in routed-expert tensors (not shared experts)
 	WeightsBytes uint64
-	Owner        string
-	Baseline     bool
-	BaselineNote string
-	Warnings     []string
+	// ReadBytes is the number of weight bytes read to produce one token,
+	// computed from each tensor's type and shape: routed experts count
+	// used/total of the time and the input embedding is a row lookup, not a
+	// full read. Zero when a tensor type is unknown; see ReadBytesSource.
+	ReadBytes       uint64
+	ReadBytesSource Source
+	ContextLength   uint64 // training/maximum context from the header, 0 if absent
+	CacheModel      string // "" for ordinary K/V; "mla" or "swa" when the KV figure is only an upper bound
+	Owner           string
+	Baseline        bool
+	BaselineNote    string
+	Warnings        []string
 }
 
 // IsMoE reports whether the model routes tokens to a subset of experts.
@@ -73,6 +81,22 @@ func (m *Model) ActiveFraction() float64 {
 // ActiveParams is the parameter count read per token.
 func (m *Model) ActiveParams() uint64 {
 	return uint64(float64(m.Params) * m.ActiveFraction())
+}
+
+// BytesPerToken is the best available figure for weight bytes read per
+// generated token: the tensor-level count when every type was recognised,
+// otherwise total weights scaled by the active fraction.
+func (m *Model) BytesPerToken() (float64, Source) {
+	if m.ReadBytes > 0 {
+		return float64(m.ReadBytes), m.ReadBytesSource
+	}
+	return float64(m.WeightsBytes) * m.ActiveFraction(), Inferred
+}
+
+// isInputEmbedding matches the token embedding table, which decode reads
+// one row of rather than in full.
+func isInputEmbedding(name string) bool {
+	return name == "token_embd.weight" || strings.HasPrefix(name, "token_embd.")
 }
 
 // AttentionLayers counts layers that hold a KV cache.
@@ -187,19 +211,63 @@ func (m *Model) fill(headers []*gguf.Header, fallbackName string, partial bool) 
 		m.warn("general.file_type missing; quantization unknown")
 	}
 
+	if n, ok := h.Uint("split.count"); ok && n > 1 && uint64(len(headers)) < n && !partial {
+		m.warn(fmt.Sprintf("header declares %d shards but %d were found; sizes and counts are incomplete", n, len(headers)))
+		partial = true
+	}
+
+	var expertBytes, alwaysBytes, embeddingBytes float64
+	typesKnown, hasOutput := true, false
 	for _, fh := range headers {
 		for _, t := range fh.Tensors {
 			n := t.Elements()
+			if n == 0 {
+				return fmt.Errorf("tensor %q has an invalid shape", t.Name)
+			}
 			m.TotalElems += n
-			if isRoutedExpert(t.Name) {
+			b, ok := t.Bytes()
+			if !ok {
+				typesKnown = false
+			}
+			switch {
+			case isRoutedExpert(t.Name):
 				m.ExpertElems += n
+				expertBytes += float64(b)
+			case isInputEmbedding(t.Name):
+				embeddingBytes += float64(b)
+			default:
+				if t.Name == "output.weight" {
+					hasOutput = true
+				}
+				alwaysBytes += float64(b)
 			}
 		}
+	}
+	if partial {
+		// One shard's tensor mix says nothing about the whole model.
+		m.TotalElems, m.ExpertElems = 0, 0
+	}
+	if !hasOutput {
+		// Tied embeddings: the embedding table doubles as the LM head and is
+		// read in full for every token, not just one row.
+		alwaysBytes += embeddingBytes
+	}
+	if typesKnown && m.TotalElems > 0 {
+		share := 1.0
+		if e, ok := h.Uint(m.Arch + ".expert_count"); ok && e > 1 {
+			if u, ok := h.Uint(m.Arch + ".expert_used_count"); ok && u > 0 {
+				share = float64(u) / float64(e)
+			}
+		}
+		// Storage size is a proxy for bytes transferred; it is never a
+		// measurement of execution, so the label stays inferred.
+		m.ReadBytes = uint64(alwaysBytes + expertBytes*share)
+		m.ReadBytesSource = Inferred
 	}
 	switch n, ok := h.Uint("general.parameter_count"); {
 	case ok && n > 0:
 		m.Params, m.ParamsSource = n, Measured
-	case !partial && m.TotalElems > 0:
+	case m.TotalElems > 0:
 		m.Params, m.ParamsSource = m.TotalElems, Observed
 		m.warn("general.parameter_count missing; summed tensor elements instead")
 	default:
@@ -209,10 +277,6 @@ func (m *Model) fill(headers []*gguf.Header, fallbackName string, partial bool) 
 		}
 		m.Params, m.ParamsSource = uint64(float64(m.WeightsBytes)*8/bpw), Inferred
 		m.warn(fmt.Sprintf("parameter count estimated from %s size at %.2f bits/weight", m.Quant, bpw))
-		if partial {
-			// Expert accounting from one shard would be skewed; fall back.
-			m.TotalElems, m.ExpertElems = 0, 0
-		}
 	}
 
 	a := m.Arch
@@ -222,29 +286,32 @@ func (m *Model) fill(headers []*gguf.Header, fallbackName string, partial bool) 
 	}
 	m.Layers = uint32(layers)
 
+	heads, _ := h.Uint(a + ".attention.head_count")
+	embd, _ := h.Uint(a + ".embedding_length")
 	kv, ok := h.UintSlice(a + ".attention.head_count_kv")
 	if !ok {
-		return fmt.Errorf("%s.attention.head_count_kv missing", a)
+		// Plain multi-head attention: llama.cpp defaults head_count_kv to head_count.
+		if heads == 0 {
+			return fmt.Errorf("%s.attention.head_count_kv and head_count both missing", a)
+		}
+		kv = []uint64{heads}
 	}
 	m.KVHeads = expandPerLayer(kv, m.Layers)
 	if len(kv) != 1 && len(kv) != int(m.Layers) {
 		m.warn(fmt.Sprintf("head_count_kv has %d entries for %d layers; padded with 0", len(kv), m.Layers))
 	}
-	// Hybrid architectures (qwen3next/qwen35 family) interleave recurrent
-	// layers with full attention: only every Nth layer holds a KV cache. The
-	// trailing next-token-prediction layers are attention layers too.
-	if interval, ok := h.Uint(a + ".full_attention_interval"); ok && interval > 1 {
-		nextn, _ := h.Uint(a + ".nextn_predict_layers")
-		main := uint64(m.Layers) - nextn
-		for i := uint64(0); i < main; i++ {
-			if (i+1)%interval != 0 {
-				m.KVHeads[i] = 0
-			}
-		}
+	if err := m.applyHybridLayers(h); err != nil {
+		return err
 	}
-
-	heads, _ := h.Uint(a + ".attention.head_count")
-	embd, _ := h.Uint(a + ".embedding_length")
+	m.ContextLength, _ = h.Uint(a + ".context_length")
+	switch {
+	case hasKey(h, a+".attention.kv_lora_rank"):
+		m.CacheModel = "mla"
+		m.warn("multi-head latent attention (kv_lora_rank): the runtime stores a compressed cache; KV figures here are an upper bound")
+	case hasKey(h, a+".attention.sliding_window") || hasKey(h, a+".attention.shared_kv_layers"):
+		m.CacheModel = "swa"
+		m.warn("sliding-window or shared KV layers: those layers cap their cache at the window; KV figures here are an upper bound")
+	}
 	if k, ok := h.Uint(a + ".attention.key_length"); ok {
 		m.KeyLen = uint32(k)
 	} else if heads > 0 && embd > 0 {
@@ -361,6 +428,65 @@ func FromMLXDir(dir string) (*Model, error) {
 	}
 	m.Files = files
 	return m, nil
+}
+
+// hybridDefaultInterval is llama.cpp's fallback for the qwen35 family when
+// the header carries neither an explicit recurrent-layer mask nor an
+// interval: every 4th layer is full attention.
+var hybridDefaultInterval = map[string]uint64{"qwen35": 4, "qwen35moe": 4, "qwen3next": 4}
+
+// applyHybridLayers zeroes KV heads on recurrent (linear-attention/SSM)
+// layers. Precedence follows llama.cpp: an explicit
+// {arch}.attention.recurrent_layers mask wins; otherwise
+// {arch}.full_attention_interval; otherwise the architecture default. The
+// trailing next-token-prediction layers keep a KV cache (Ollama's server
+// log allocates one for them).
+func (m *Model) applyHybridLayers(h *gguf.Header) error {
+	a := m.Arch
+	nextn, _ := h.Uint(a + ".nextn_predict_layers")
+	if nextn > uint64(m.Layers) {
+		return fmt.Errorf("%s.nextn_predict_layers (%d) exceeds block_count (%d)", a, nextn, m.Layers)
+	}
+	main := uint64(m.Layers) - nextn
+
+	if mask, ok := h.UintSlice(a + ".attention.recurrent_layers"); ok && len(mask) > 0 {
+		recurrent := make([]bool, m.Layers)
+		if len(mask) == int(m.Layers) {
+			for i, v := range mask { // one flag per layer
+				recurrent[i] = v != 0
+			}
+		} else {
+			for _, idx := range mask { // list of recurrent layer indexes
+				if idx < uint64(m.Layers) {
+					recurrent[idx] = true
+				}
+			}
+		}
+		for i := range recurrent {
+			if recurrent[i] {
+				m.KVHeads[i] = 0
+			}
+		}
+		return nil
+	}
+	interval, ok := h.Uint(a + ".full_attention_interval")
+	if !ok {
+		interval, ok = hybridDefaultInterval[a]
+	}
+	if !ok || interval <= 1 {
+		return nil
+	}
+	for i := uint64(0); i < main; i++ {
+		if (i+1)%interval != 0 {
+			m.KVHeads[i] = 0
+		}
+	}
+	return nil
+}
+
+func hasKey(h *gguf.Header, key string) bool {
+	_, ok := h.Metadata[key]
+	return ok
 }
 
 func (m *Model) warn(s string) { m.Warnings = append(m.Warnings, s) }

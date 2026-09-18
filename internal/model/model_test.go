@@ -48,7 +48,9 @@ func TestFromGGUFDense(t *testing.T) {
 	if m.Quant != "Q4_K_M" {
 		t.Errorf("quant = %s", m.Quant)
 	}
-	if m.Layers != 66 || m.AttentionLayers() != 66 || m.KeyLen != 128 || m.ValLen != 128 {
+	// qwen35 without an explicit interval defaults to full attention every
+	// 4th layer (llama.cpp's fallback): 66/4 = 16 layers hold KV.
+	if m.Layers != 66 || m.AttentionLayers() != 16 || m.KeyLen != 128 || m.ValLen != 128 {
 		t.Errorf("geometry = layers %d attn %d k %d v %d", m.Layers, m.AttentionLayers(), m.KeyLen, m.ValLen)
 	}
 	if m.IsMoE() || m.ActiveFraction() != 1 {
@@ -129,9 +131,11 @@ func TestFromGGUFMoEExpertAccounting(t *testing.T) {
 		f.Metadata[k] = v
 	}
 	f.Tensors = []gguf.TensorInfo{
-		{Name: "blk.0.attn_q.weight", Dims: []uint64{1000}},
-		{Name: "blk.0.ffn_gate_exps.weight", Dims: []uint64{256, 100}}, // 25600 routed
-		{Name: "blk.0.ffn_gate_shexp.weight", Dims: []uint64{400}},     // shared: always active
+		{Name: "token_embd.weight", Dims: []uint64{1000}, Type: 0},              // 4000 B: row lookup, not read (output.weight exists)
+		{Name: "output.weight", Dims: []uint64{100}, Type: 1},                   // 200 B always
+		{Name: "blk.0.attn_q.weight", Dims: []uint64{1000}, Type: 1},            // 2000 B always
+		{Name: "blk.0.ffn_gate_exps.weight", Dims: []uint64{256, 100}, Type: 0}, // 25600 routed elems, 102400 B
+		{Name: "blk.0.ffn_gate_shexp.weight", Dims: []uint64{400}, Type: 1},     // 800 B shared: always active
 	}
 	p := filepath.Join(t.TempDir(), "m.gguf")
 	writeFixture(t, p, f, 0)
@@ -142,15 +146,20 @@ func TestFromGGUFMoEExpertAccounting(t *testing.T) {
 	if m.AttentionLayers() != 11 {
 		t.Errorf("attention layers = %d, want 10 + 1 nextn", m.AttentionLayers())
 	}
-	if m.TotalElems != 27000 || m.ExpertElems != 25600 {
+	if m.TotalElems != 28100 || m.ExpertElems != 25600 {
 		t.Errorf("elems total=%d expert=%d", m.TotalElems, m.ExpertElems)
 	}
-	// always-active 1400 + 25600 * 8/256 = 2200 of 27000
-	if want := 2200.0 / 27000; math.Abs(m.ActiveFraction()-want) > 1e-9 {
+	// always-active 2500 + 25600 * 8/256 = 3300 of 28100
+	if want := 3300.0 / 28100; math.Abs(m.ActiveFraction()-want) > 1e-9 {
 		t.Errorf("active fraction = %v, want %v", m.ActiveFraction(), want)
 	}
-	if m.ActiveParams() != 2200 {
+	if m.ActiveParams() != 3300 {
 		t.Errorf("active params = %d", m.ActiveParams())
+	}
+	// bytes read per token: 200 + 2000 + 800 always + 102400 * 8/256 = 6200;
+	// the embedding table is a row lookup and does not count.
+	if b, src := m.BytesPerToken(); b != 6200 || src != Inferred {
+		t.Errorf("bytes/token = %v (%s), want 6200 inferred", b, src)
 	}
 }
 
@@ -193,13 +202,207 @@ func TestFromGGUFMissingKeyLengthFallsBack(t *testing.T) {
 	}
 }
 
-func TestFromGGUFMissingKVHeadsIsError(t *testing.T) {
+func TestFromGGUFMissingKVHeadsAndHeadCountIsError(t *testing.T) {
 	f := dense()
 	delete(f.Metadata, "qwen35.attention.head_count_kv")
+	delete(f.Metadata, "qwen35.attention.head_count")
 	p := filepath.Join(t.TempDir(), "m.gguf")
 	writeFixture(t, p, f, 0)
-	if _, err := FromGGUF(p); err == nil || !strings.Contains(err.Error(), "head_count_kv") {
+	if _, err := FromGGUF(p); err == nil || !strings.Contains(err.Error(), "head_count") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestHybridPrecedenceAndDefaults(t *testing.T) {
+	base := func() gguf.Fixture {
+		f := dense()
+		f.Metadata["qwen35.block_count"] = uint32(9)
+		f.Metadata["qwen35.nextn_predict_layers"] = uint32(1)
+		return f
+	}
+	p := filepath.Join(t.TempDir(), "m.gguf")
+
+	// No interval key: the qwen35 family defaults to every 4th layer → 3,7 + nextn 8.
+	writeFixture(t, p, base(), 0)
+	m, err := FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AttentionLayers() != 3 {
+		t.Errorf("default interval: attention layers = %d, want 3", m.AttentionLayers())
+	}
+
+	// Explicit recurrent_layers mask wins over the interval.
+	f := base()
+	f.Metadata["qwen35.full_attention_interval"] = uint32(4)
+	f.Metadata["qwen35.attention.recurrent_layers"] = []uint32{1, 1, 1, 1, 1, 1, 1, 0, 0}
+	writeFixture(t, p, f, 0)
+	m, err = FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AttentionLayers() != 2 || m.KVHeads[7] == 0 || m.KVHeads[8] == 0 {
+		t.Errorf("mask: attention layers = %d kv=%v", m.AttentionLayers(), m.KVHeads)
+	}
+
+	// Index-list form of the mask.
+	f = base()
+	f.Metadata["qwen35.attention.recurrent_layers"] = []uint32{0, 1, 2}
+	writeFixture(t, p, f, 0)
+	m, _ = FromGGUF(p)
+	if m.AttentionLayers() != 6 {
+		t.Errorf("index mask: attention layers = %d, want 6", m.AttentionLayers())
+	}
+
+	// A non-hybrid architecture without the key keeps every layer.
+	f = base()
+	f.Metadata["general.architecture"] = "llama"
+	for k, v := range map[string]any{"llama.block_count": uint32(9), "llama.attention.head_count": uint32(40),
+		"llama.attention.head_count_kv": uint32(8), "llama.attention.key_length": uint32(128)} {
+		f.Metadata[k] = v
+	}
+	writeFixture(t, p, f, 0)
+	m, err = FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AttentionLayers() != 9 {
+		t.Errorf("llama: attention layers = %d, want 9", m.AttentionLayers())
+	}
+
+	// nextn larger than block_count is a corrupt header, not a panic.
+	f = base()
+	f.Metadata["qwen35.nextn_predict_layers"] = uint32(50)
+	writeFixture(t, p, f, 0)
+	if _, err := FromGGUF(p); err == nil || !strings.Contains(err.Error(), "nextn") {
+		t.Errorf("nextn overflow: %v", err)
+	}
+}
+
+func TestMissingKVHeadsDefaultsToMHA(t *testing.T) {
+	f := dense()
+	f.Metadata["general.architecture"] = "llama"
+	for k, v := range map[string]any{"llama.block_count": uint32(2), "llama.attention.head_count": uint32(32),
+		"llama.attention.key_length": uint32(128)} {
+		f.Metadata[k] = v
+	}
+	p := filepath.Join(t.TempDir(), "m.gguf")
+	writeFixture(t, p, f, 0)
+	m, err := FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.KVHeads[0] != 32 || m.KVHeads[1] != 32 {
+		t.Errorf("kv heads = %v, want head_count (32) on every layer", m.KVHeads)
+	}
+}
+
+func TestCacheModelWarningsContextAndSplit(t *testing.T) {
+	f := dense()
+	f.Metadata["qwen35.attention.kv_lora_rank"] = uint32(512)
+	f.Metadata["qwen35.context_length"] = uint32(262144)
+	f.Metadata["split.count"] = uint16(3)
+	p := filepath.Join(t.TempDir(), "m.gguf")
+	writeFixture(t, p, f, 0)
+	m, err := FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.CacheModel != "mla" || m.ContextLength != 262144 {
+		t.Errorf("cache=%q ctx=%d", m.CacheModel, m.ContextLength)
+	}
+	joined := strings.Join(m.Warnings, "\n")
+	if !strings.Contains(joined, "upper bound") || !strings.Contains(joined, "declares 3 shards") {
+		t.Errorf("warnings = %v", m.Warnings)
+	}
+	f = dense()
+	f.Metadata["qwen35.attention.sliding_window"] = uint32(4096)
+	writeFixture(t, p, f, 0)
+	if m, _ := FromGGUF(p); m.CacheModel != "swa" {
+		t.Errorf("swa cache model = %q", m.CacheModel)
+	}
+}
+
+func TestTiedEmbeddingsCountAsOutputHead(t *testing.T) {
+	f := dense()
+	f.Tensors = []gguf.TensorInfo{
+		{Name: "token_embd.weight", Dims: []uint64{1000}, Type: 1},   // 2000 B
+		{Name: "blk.0.attn_q.weight", Dims: []uint64{256}, Type: 12}, // 144 B
+	}
+	p := filepath.Join(t.TempDir(), "m.gguf")
+	writeFixture(t, p, f, 0)
+	m, err := FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, src := m.BytesPerToken(); b != 2144 || src != Inferred {
+		t.Errorf("tied embeddings: bytes/token = %v (%s), want 2144 inferred", b, src)
+	}
+	f.Tensors = append(f.Tensors, gguf.TensorInfo{Name: "output.weight", Dims: []uint64{64}, Type: 8}) // 68 B
+	writeFixture(t, p, f, 0)
+	m, _ = FromGGUF(p)
+	if b, _ := m.BytesPerToken(); b != 212 {
+		t.Errorf("untied: bytes/token = %v, want 212", b)
+	}
+}
+
+func TestPartialHeaderNeverFeedsExpertFraction(t *testing.T) {
+	f := dense()
+	f.Metadata["general.architecture"] = "qwen35moe"
+	for k, v := range map[string]any{
+		"qwen35moe.block_count": uint32(4), "qwen35moe.attention.head_count": uint32(16),
+		"qwen35moe.attention.head_count_kv": uint32(2), "qwen35moe.attention.key_length": uint32(128),
+		"qwen35moe.expert_count": uint32(256), "qwen35moe.expert_used_count": uint32(8),
+	} {
+		f.Metadata[k] = v
+	}
+	f.Tensors = []gguf.TensorInfo{{Name: "blk.0.ffn_gate_exps.weight", Dims: []uint64{256, 100}, Type: 0}}
+	p := filepath.Join(t.TempDir(), "m.gguf")
+	writeFixture(t, p, f, 0)
+	h, err := gguf.ReadHeader(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := FromHeader(h, "hf:x/y", "y", 10_000_000_000, "x", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.TotalElems != 0 || m.ExpertElems != 0 || m.ReadBytes != 0 {
+		t.Errorf("partial header leaked tensor sums: total=%d expert=%d read=%d", m.TotalElems, m.ExpertElems, m.ReadBytes)
+	}
+	if m.ActiveFraction() != 8.0/256 {
+		t.Errorf("active fraction should fall back to used/total, got %v", m.ActiveFraction())
+	}
+}
+
+func TestDenseReadBytesAndUnknownType(t *testing.T) {
+	f := dense()
+	f.Tensors = []gguf.TensorInfo{
+		{Name: "token_embd.weight", Dims: []uint64{1000}, Type: 1},
+		{Name: "blk.0.attn_q.weight", Dims: []uint64{256}, Type: 12}, // one Q4_K block = 144 B
+		{Name: "output.weight", Dims: []uint64{64}, Type: 8},         // two Q8_0 blocks = 68 B
+	}
+	p := filepath.Join(t.TempDir(), "m.gguf")
+	writeFixture(t, p, f, 0)
+	m, err := FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, src := m.BytesPerToken(); b != 212 || src != Inferred {
+		t.Errorf("dense bytes/token = %v (%s), want 212 inferred", b, src)
+	}
+
+	f.Tensors = append(f.Tensors, gguf.TensorInfo{Name: "blk.1.weird", Dims: []uint64{8}, Type: 4})
+	writeFixture(t, p, f, 0)
+	m, err = FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ReadBytes != 0 {
+		t.Errorf("unknown tensor type must disable tensor-level reads, got %d", m.ReadBytes)
+	}
+	if b, src := m.BytesPerToken(); b != float64(m.WeightsBytes) || src != Inferred {
+		t.Errorf("fallback bytes/token = %v (%s)", b, src)
 	}
 }
 

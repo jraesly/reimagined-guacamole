@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jraesly/reimagined-guacamole/internal/calib"
 	"github.com/jraesly/reimagined-guacamole/internal/fit"
 	"github.com/jraesly/reimagined-guacamole/internal/hw"
 	"github.com/jraesly/reimagined-guacamole/internal/model"
@@ -24,8 +26,29 @@ func sample() Report {
 	budget := info.Budget(8)
 	// 2 KV layers × 4 heads × 512 × 2 B = 8 KiB/token: 0.25 GB at 32k (fits),
 	// 8 GB at 1M (15.7 + 8 + 0.5 > 24 GB budget: no).
-	res := Build(m, []string{"qwen3.8:27b-32k"}, []string{"/x/mmproj-F32.gguf"}, budget.GB, fit.Options{Contexts: []uint64{32768, 1048576}, KV: fit.KVF16}, info.BandwidthGBs)
+	res := Build(m, []string{"qwen3.8:27b-32k"}, []string{"/x/mmproj-F32.gguf"}, budget.GB, fit.Options{Contexts: []uint64{32768, 1048576}, KV: fit.KVF16}, info.BandwidthGBs, nil)
 	return Report{Hardware: info, Budget: budget, KV: fit.KVF16, Models: []ModelResult{res}}
+}
+
+func TestBuildUsesCalibration(t *testing.T) {
+	cf := &calib.File{Version: 1}
+	cf.Add(calib.Sample{Model: "qwen3.8:27b-32k", Kind: "dense", Backend: "ollama", TokPerSec: 11.35,
+		BytesPerToken: 16e9, Context: 4096, MeasuredAt: time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC)})
+	r := sample()
+	m := &model.Model{Name: "qwen3.8:27b", Params: 1, Layers: 1, KVHeads: []uint32{1}, KeyLen: 1, ValLen: 1, WeightsBytes: 8e9}
+	res := Build(m, []string{"qwen3.8:27b-32k"}, nil, r.Budget.GB, fit.Options{}, 0, cf)
+	if res.MeasuredTokS == nil || res.MeasuredTokS.Value != 11.35 || res.MeasuredTokS.MeasuredAt != "2026-09-17" {
+		t.Errorf("measured = %+v (alias lookup should find the sample)", res.MeasuredTokS)
+	}
+	// 16e9 × 11.35 = 181.6 GB/s effective; 8 GB/token → 22.7 tok/s, calibrated basis, no bandwidth needed.
+	if res.DecodeTokS == nil || res.DecodeTokS.Value < 22 || res.DecodeTokS.Value > 23.5 || !strings.Contains(res.DecodeTokS.Basis, "calibrated") {
+		t.Errorf("estimate = %+v", res.DecodeTokS)
+	}
+	var b bytes.Buffer
+	WriteText(&b, Report{Hardware: r.Hardware, Budget: r.Budget, KV: fit.KVF16, Models: []ModelResult{res}})
+	if !strings.Contains(b.String(), "decode: 11.3 tok/s measured (ollama, 4k context, 2026-09-17)") {
+		t.Errorf("text missing measured line:\n%s", b.String())
+	}
 }
 
 func TestWriteTextContainsKeyFacts(t *testing.T) {

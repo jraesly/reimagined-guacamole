@@ -62,6 +62,7 @@ type Row struct {
 	TotalGB  float64
 	BudgetGB float64
 	Verdict  Verdict
+	Note     string `json:",omitempty"` // e.g. the context exceeds the model's maximum
 }
 
 // Options tune the table.
@@ -105,7 +106,11 @@ func Table(m *model.Model, budgetGB float64, opts Options) ([]Row, error) {
 	for _, ctx := range opts.Contexts {
 		kvGB := perTok * float64(ctx) / GiB
 		total := weightsGB + kvGB + opts.ComputeGB
-		rows = append(rows, Row{Context: ctx, KVGB: kvGB, TotalGB: total, BudgetGB: budgetGB, Verdict: Classify(total, budgetGB)})
+		row := Row{Context: ctx, KVGB: kvGB, TotalGB: total, BudgetGB: budgetGB, Verdict: Classify(total, budgetGB)}
+		if m.ContextLength > 0 && ctx > m.ContextLength {
+			row.Note = fmt.Sprintf("exceeds the model's %dk context", m.ContextLength/1024)
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }
@@ -142,15 +147,62 @@ const (
 type Speed struct {
 	TokPerSec  float64
 	Confidence string // "medium" for dense, "low" for MoE
+	Basis      string // how the number was produced
 }
 
-// DecodeEstimate estimates decode tokens/second from memory bandwidth.
-func DecodeEstimate(m *model.Model, bandwidthGBs float64) (Speed, bool) {
-	if bandwidthGBs <= 0 || m.WeightsBytes == 0 {
+// Calibration is what the machine has measured so far; nil means none.
+type Calibration interface {
+	// Effective returns the median effective bandwidth (GB/s actually
+	// achieved) for a model kind and how many samples back it.
+	Effective(kind string) (float64, int)
+}
+
+// Kind classifies a model for calibration purposes.
+func Kind(m *model.Model) string {
+	if m.IsMoE() {
+		return "moe"
+	}
+	return "dense"
+}
+
+// Estimate picks the best available basis: this machine's measurements of
+// the same kind of model, else the chip bandwidth table with a default
+// efficiency. Both are inferred; the report says which was used.
+func Estimate(m *model.Model, bandwidthGBs float64, cal Calibration) (Speed, bool) {
+	bytesPerTok, _ := m.BytesPerToken()
+	if bytesPerTok == 0 {
 		return Speed{}, false
 	}
-	activeGB := float64(m.WeightsBytes) / 1e9 * m.ActiveFraction()
-	roofline := bandwidthGBs / activeGB
+	if cal != nil {
+		if eff, n := cal.Effective(Kind(m)); n > 0 {
+			// One run on one model is a data point, not a calibration.
+			conf := "medium"
+			if n >= 2 && !m.IsMoE() {
+				conf = "high"
+			}
+			return Speed{
+				TokPerSec:  eff / (bytesPerTok / 1e9),
+				Confidence: conf,
+				Basis:      fmt.Sprintf("calibrated from %d measured %s run(s) on this machine", n, Kind(m)),
+			}, true
+		}
+	}
+	s, ok := DecodeEstimate(m, bandwidthGBs)
+	if !ok {
+		return Speed{}, false
+	}
+	s.Basis = fmt.Sprintf("chip bandwidth table × default %s efficiency; run fit --measure to calibrate", Kind(m))
+	return s, true
+}
+
+// DecodeEstimate estimates decode tokens/second from memory bandwidth and
+// the bytes the model reads per token.
+func DecodeEstimate(m *model.Model, bandwidthGBs float64) (Speed, bool) {
+	bytesPerTok, _ := m.BytesPerToken()
+	if bandwidthGBs <= 0 || bytesPerTok == 0 {
+		return Speed{}, false
+	}
+	roofline := bandwidthGBs / (bytesPerTok / 1e9)
 	if m.IsMoE() {
 		return Speed{TokPerSec: roofline * moeEfficiency, Confidence: "low"}, true
 	}

@@ -100,9 +100,36 @@ Default: counts, hashes, and redacted 80-char excerpts only. `--dump DIR` opts i
 - Tokenizer mismatch: report the encoding; treat sub-totals as inferred.
 
 ## Validation paths (both before release)
-- Mac (M1 Max, 32 GB): `fit` on the DavidAU Qwen 3.8 27B Q4_K_S already on disk must say `variant`, `16/64 layers hold KV`, fits at 64k, `no` at 256k. Met on 2026-09-17: the header's `full_attention_interval = 4` gives 65,536 KV bytes/token, and `fit`'s 16,384 MiB at 262k / 2,048 MiB at 32k match Ollama's server log to the MiB, which is why the 256k app default spilled 32 of 66 layers to CPU (0.35 tok/s) and 32k ran at 11.35 tok/s. Then OpenCode → LM Studio with `unsloth/Qwen3.8-27B-GGUF` UD-Q4_K_XL, plus the Nemotron 4B that is slow today.
-- Linux/4090 (24 GB VRAM): `fit` must show the 27B Q4 fitting at 32k with `--reserve-gb 2` and the 125B Flash-Next as `no` at every context; then OpenCode → llama-server.
-- Success: `fit`'s predicted fit/no-fit is confirmed by actually loading the model at that context on both machines, and on the ~50k-prefill machine the `capture` report names the harness-added tokens and the prefix break; the report is good enough to attach to an OpenCode issue as-is.
+- Mac (M1 Max, 32 GB): `fit` on the DavidAU Qwen 3.8 27B Q4_K_S already on disk must say `variant`, `16/64 layers hold KV`, fits at 64k, `no` at 256k. **Met on 2026-09-17**: the header's `full_attention_interval = 4` gives 65,536 KV bytes/token, and `fit`'s 16,384 MiB at 262k / 2,048 MiB at 32k match Ollama's server log to the MiB, which is why the 256k app default spilled 32 of 66 layers to CPU (0.35 tok/s) and 32k ran at 11.35 tok/s. `fit --measure` at 4k context recorded 13.1 tok/s for `qwen3.8:27b` and 53.2 tok/s for `qwen3.6:35b` (MoE, ~3.5B active), now used for calibrated estimates in place of the chip table. A live `capture` run through Ollama with a fake harness confirmed the accounting end to end: turn 1 showed 425 prompt tokens of which 390 were harness-added (tools `write_file` 123, `read_file` 111, `bash` 105), and turn 3, where the system prompt's timestamp changed, flagged `break: system[0].content@84 "…Current time: 22:41:|19"` with 12.3% wasted prefill for the session. The OpenCode → LM Studio path with `unsloth/Qwen3.8-27B-GGUF` UD-Q4_K_XL, and the Nemotron 4B that is slow today, are still to be run through `capture` for a full session report.
+- Linux/4090 (24 GB VRAM): `fit` must show the 27B Q4 fitting at 32k with `--reserve-gb 2` and the 125B Flash-Next as `no` at every context; then OpenCode → llama-server. **Pending** — not yet run.
+- Success: `fit`'s predicted fit/no-fit is confirmed by actually loading the model at that context on both machines, and on the ~50k-prefill machine the `capture` report names the harness-added tokens and the prefix break; the report is good enough to attach to an OpenCode issue as-is. Met on the Mac; the Linux/4090 half of this criterion is still open.
+
+## Implemented deviations from this spec
+
+The shipped tool differs from this spec in a few places, all additive:
+
+- **Remote targets**: `fit` accepts `ollama:<name>[:<tag>]` and
+  `hf:<owner>/<repo>[:<file-filter>]` targets, reading only the GGUF/MLX
+  header via HTTP range requests (a v0.2 candidate in the original spec,
+  pulled forward because `--suggest --online` needs it).
+- **`--measure` calibration**: `fit --measure` runs installed Ollama models
+  briefly and records bytes-per-token vs. tokens/second to
+  `~/.config/probe/calibration.json`, which `fit` then prefers over the
+  static chip bandwidth table for any model of the same kind. Not in the
+  original spec's `fit` inputs.
+- **`header` subcommand**: `probe header model.gguf` dumps the raw GGUF
+  metadata `fit` reads, for debugging a specific model's header.
+- **No tokenizer**: `capture`'s spec called for a local tiktoken-compatible
+  BPE estimate for sub-totals. The shipped version apportions sub-totals by
+  character share of the upstream's measured `usage.prompt_tokens` instead
+  (or a ~4-chars/token estimate when no usage is reported), and labels the
+  result inferred either way.
+- **Ollama `reasoning` delta counted as output**: alongside
+  `reasoning_content` (llama-server, LM Studio), Ollama's `reasoning` delta
+  field is recognized as first output for TTFT purposes.
+- **`--json`/`--report` flags on `capture`**: NDJSON-per-turn-plus-summary
+  and a Markdown session report are written via explicit flags rather than
+  always-on output, so the live terminal view stays the default.
 
 ## Tests
 - `fit` unit: GGUF header parser against synthetic fixture headers (dense, MoE, sharded, missing `n_head_kv`); KV and budget math with hand-checked expected values; baseline/variant classification; `models.yaml` schema (date, publisher allowlist, memory class) fails the build if stale >90 days.
@@ -114,10 +141,10 @@ Default: counts, hashes, and redacted 80-char excerpts only. `--dump DIR` opts i
 - A failing-first test for each edge case above.
 
 ## Milestones (solo, ~4 weeks)
-1. `fit`: GGUF/MLX header readers, hardware detection, memory table, speed estimate, baseline check, `--suggest`, tests. Ship it alone as v0.1.0 — it is useful by itself and is what you need this week (week 1).
-2. `capture`: proxy + streaming pass-through + timing + cancel (week 2).
-3. Token accounting + prefix diff + live line + report + tests (week 3).
-4. Backend telemetry, both validation paths, dogfood, README with a real `fit` table and a real `capture` report screenshot (week 4).
+1. **Implemented.** `fit`: GGUF/MLX header readers, hardware detection, memory table, speed estimate, baseline check, `--suggest`, tests. Shipped alone first, as planned — useful by itself.
+2. **Implemented.** `capture`: proxy + streaming pass-through + timing + cancel.
+3. **Implemented.** Token accounting + prefix diff + live line + report + tests.
+4. **Partially implemented.** Backend telemetry (llama.cpp `timings`, LM Studio `stats`) is done and exercised by the Mac validation path below; the Linux/4090 validation path is still pending. README now carries a real `fit` table and a real `capture` session excerpt (see `README.md`) in place of a screenshot.
 
 ## v0.2 candidates (only if people re-run it)
 `verify` (before/after a config change), `bench` (paired minimal vs captured request), `fit --hf org/repo` (read a Hugging Face config without downloading), Continue/Cline adapters, always-on mode with history.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/jraesly/reimagined-guacamole/internal/calib"
 	"github.com/jraesly/reimagined-guacamole/internal/fit"
 	"github.com/jraesly/reimagined-guacamole/internal/hw"
 	"github.com/jraesly/reimagined-guacamole/internal/model"
@@ -41,16 +42,33 @@ type ModelResult struct {
 	Rows           []fit.Row   `json:"rows"`
 	MaxContext     uint64      `json:"max_context"`
 	DecodeTokS     *SpeedValue `json:"decode_tok_s,omitempty"`
+	MeasuredTokS   *Measured   `json:"measured_tok_s,omitempty"`
 	Warnings       []string    `json:"warnings,omitempty"`
 	Extras         []string    `json:"reclaimable_files,omitempty"`
 	Error          string      `json:"error,omitempty"`
 }
 
-// SpeedValue is an estimated rate with confidence.
+// SpeedValue is an estimated rate with confidence and the basis used.
 type SpeedValue struct {
 	Value      float64      `json:"value"`
 	Source     model.Source `json:"source"`
 	Confidence string       `json:"confidence"`
+	Basis      string       `json:"basis,omitempty"`
+}
+
+// Measured is a decode rate this machine actually produced.
+type Measured struct {
+	Value      float64      `json:"value"`
+	Source     model.Source `json:"source"`
+	Backend    string       `json:"backend"`
+	Context    int          `json:"context"`
+	MeasuredAt string       `json:"measured_at"`
+}
+
+// Calibration is the subset of calib.File the report needs.
+type Calibration interface {
+	fit.Calibration
+	Lookup(names ...string) (calib.Sample, bool)
 }
 
 // Report is the whole fit output.
@@ -64,8 +82,11 @@ type Report struct {
 	ListNote   string         `json:"suggestion_note,omitempty"`
 }
 
-// Build assembles a ModelResult from a model and the fit table.
-func Build(m *model.Model, aliases []string, extras []string, budgetGB float64, opts fit.Options, bandwidth float64) ModelResult {
+// Build assembles a ModelResult from a model and the fit table. cal may be nil.
+func Build(m *model.Model, aliases []string, extras []string, budgetGB float64, opts fit.Options, bandwidth float64, cal Calibration) ModelResult {
+	if opts.KV == "" {
+		opts.KV = fit.KVF16
+	}
 	r := ModelResult{
 		Name: m.Name, Aliases: aliases, Path: m.Path, Arch: m.Arch, Quant: m.Quant,
 		Params:         Value{float64(m.Params), m.ParamsSource},
@@ -87,8 +108,16 @@ func Build(m *model.Model, aliases []string, extras []string, budgetGB float64, 
 	}
 	r.Rows = rows
 	r.MaxContext, _ = fit.MaxContext(rows)
-	if s, ok := fit.DecodeEstimate(m, bandwidth); ok {
-		r.DecodeTokS = &SpeedValue{s.TokPerSec, model.Inferred, s.Confidence}
+	var fc fit.Calibration
+	if cal != nil {
+		fc = cal
+		if s, ok := cal.Lookup(append([]string{m.Name}, aliases...)...); ok {
+			r.MeasuredTokS = &Measured{Value: s.TokPerSec, Source: model.Measured, Backend: s.Backend,
+				Context: s.Context, MeasuredAt: s.MeasuredAt.Format("2006-01-02")}
+		}
+	}
+	if s, ok := fit.Estimate(m, bandwidth, fc); ok {
+		r.DecodeTokS = &SpeedValue{s.TokPerSec, model.Inferred, s.Confidence, s.Basis}
 	}
 	return r
 }
@@ -141,7 +170,7 @@ func WriteText(w io.Writer, r Report) {
 		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "  context\tKV GB\ttotal GB\tfits")
 		for _, row := range m.Rows {
-			fmt.Fprintf(tw, "  %s\t%.1f\t%.1f\t%s\n", ctxLabel(row.Context), row.KVGB, row.TotalGB, row.Verdict)
+			fmt.Fprintf(tw, "  %s\t%.1f\t%.1f\t%s\t%s\n", ctxLabel(row.Context), row.KVGB, row.TotalGB, row.Verdict, row.Note)
 		}
 		tw.Flush()
 		if m.MaxContext > 0 {
@@ -149,8 +178,11 @@ func WriteText(w io.Writer, r Report) {
 		} else {
 			fmt.Fprintf(w, "  does not fit at any listed context\n")
 		}
+		if m.MeasuredTokS != nil {
+			fmt.Fprintf(w, "  decode: %.1f tok/s measured (%s, %s context, %s)\n", m.MeasuredTokS.Value, m.MeasuredTokS.Backend, ctxLabel(uint64(m.MeasuredTokS.Context)), m.MeasuredTokS.MeasuredAt)
+		}
 		if m.DecodeTokS != nil {
-			fmt.Fprintf(w, "  decode estimate: ~%.0f tok/s (inferred, %s confidence; run capture for a measured number)\n", m.DecodeTokS.Value, m.DecodeTokS.Confidence)
+			fmt.Fprintf(w, "  decode estimate: ~%.0f tok/s (inferred, %s confidence; %s)\n", m.DecodeTokS.Value, m.DecodeTokS.Confidence, m.DecodeTokS.Basis)
 		}
 		for _, x := range m.Extras {
 			fmt.Fprintf(w, "  reclaimable: %s (vision projector, not needed for coding)\n", x)

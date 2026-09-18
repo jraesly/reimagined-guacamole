@@ -14,9 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jraesly/reimagined-guacamole/internal/calib"
 	"github.com/jraesly/reimagined-guacamole/internal/fit"
 	"github.com/jraesly/reimagined-guacamole/internal/gguf"
 	"github.com/jraesly/reimagined-guacamole/internal/hw"
+	"github.com/jraesly/reimagined-guacamole/internal/measure"
 	"github.com/jraesly/reimagined-guacamole/internal/model"
 	"github.com/jraesly/reimagined-guacamole/internal/remote"
 	"github.com/jraesly/reimagined-guacamole/internal/report"
@@ -35,6 +37,8 @@ func main() {
 	switch os.Args[1] {
 	case "fit":
 		err = runFit(os.Args[2:])
+	case "capture":
+		err = runCapture(os.Args[2:])
 	case "header":
 		err = runHeader(os.Args[2:])
 	case "version":
@@ -54,6 +58,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   probe fit [flags] [target ...]                   fit models to this machine
+  probe capture --upstream URL [flags]             proxy a harness and measure what it sends
   probe header model.gguf                          dump GGUF header metadata (arrays summarized)
   probe version
 
@@ -72,6 +77,10 @@ func runFit(args []string) error {
 	asJSON := fs.Bool("json", false, "emit JSON with source labels")
 	doSuggest := fs.Bool("suggest", false, "append curated baseline models for this memory class")
 	online := fs.Bool("online", false, "with --suggest, read each suggested model's header from its registry and fit it")
+	doMeasure := fs.Bool("measure", false, "run each installed Ollama model briefly and record its measured decode speed for calibration")
+	measureCtx := fs.Int("measure-ctx", 4096, "context size used for --measure runs")
+	measureTokens := fs.Int("measure-tokens", 128, "tokens generated per --measure run")
+	calibPath := fs.String("calibration", "", "calibration file (default ~/.config/probe/calibration.json)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -98,6 +107,38 @@ func runFit(args []string) error {
 	budget := info.Budget(*reserve)
 	opts := fit.Options{Contexts: ctxs, KV: kvType}
 
+	if *calibPath == "" {
+		if *calibPath, err = calib.DefaultPath(); err != nil {
+			return err
+		}
+	}
+	cal, err := calib.Load(*calibPath)
+	if err != nil {
+		return err
+	}
+	if cal.Chip == "" {
+		cal.Chip = info.Chip
+	}
+	if *doMeasure && !measure.OllamaAvailable(context.Background()) {
+		return fmt.Errorf("--measure needs the Ollama API at %s; start Ollama or omit --measure", measure.OllamaBase)
+	}
+	measureOne := func(m *model.Model, t scan.Found) {
+		name := firstName(t)
+		fmt.Fprintf(os.Stderr, "measuring %s at %dk context, %d tokens (Ollama loads the model; this can take a minute)…", name, *measureCtx/1024, *measureTokens)
+		mctx, cancel := context.WithTimeout(context.Background(), measure.Timeout)
+		defer cancel()
+		res, err := measure.Ollama(mctx, name, *measureCtx, *measureTokens)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, " failed: %v\n", err)
+			return
+		}
+		bpt, _ := m.BytesPerToken()
+		cal.Add(calib.Sample{Model: name, Aliases: aliases(t), Kind: fit.Kind(m), Backend: "ollama", TokPerSec: res.TokPerSec,
+			PromptTokSec: res.PromptTokPerSec, BytesPerToken: bpt, Context: res.Context, OutputTokens: res.OutputTokens,
+			MeasuredAt: time.Now().UTC()})
+		fmt.Fprintf(os.Stderr, " %.1f tok/s decode, %.0f tok/s prompt, load %.0fs\n", res.TokPerSec, res.PromptTokPerSec, res.LoadSeconds)
+	}
+
 	var local []string
 	var refs []remote.Ref
 	for _, a := range fs.Args() {
@@ -121,11 +162,19 @@ func runFit(args []string) error {
 			rep.Models = append(rep.Models, report.ModelResult{Name: r.String(), Path: r.String(), Error: err.Error()})
 			return
 		}
-		rep.Models = append(rep.Models, report.Build(m, nil, nil, budget.GB, opts, info.BandwidthGBs))
+		rep.Models = append(rep.Models, report.Build(m, nil, nil, budget.GB, opts, info.BandwidthGBs, cal))
 	}
 	for _, r := range refs {
 		addRemote(r)
 	}
+	// Load every local model first, measure second, report third, so a
+	// measurement taken this run calibrates every model in the report.
+	type loaded struct {
+		found scan.Found
+		m     *model.Model
+		err   error
+	}
+	var locals []loaded
 	for _, t := range targets {
 		var m *model.Model
 		var merr error
@@ -134,18 +183,41 @@ func runFit(args []string) error {
 		} else {
 			m, merr = model.FromGGUF(t.Path)
 		}
-		if merr != nil {
-			rep.Models = append(rep.Models, report.ModelResult{Name: firstName(t), Path: t.Path, Error: merr.Error()})
+		if merr == nil {
+			if t.Owner != "" && (m.Owner == "" || t.Source == "ollama") {
+				m.Owner = t.Owner
+				m.Baseline, m.BaselineNote = model.Classify(m.Owner, m.Name)
+			}
+			if len(t.Names) > 0 {
+				m.Name = t.Names[0]
+			}
+		}
+		locals = append(locals, loaded{t, m, merr})
+	}
+	measured := 0
+	if *doMeasure {
+		for _, l := range locals {
+			if l.err == nil && l.found.Source == "ollama" {
+				measureOne(l.m, l.found)
+				measured++
+			}
+		}
+	}
+	for _, l := range locals {
+		if l.err != nil {
+			rep.Models = append(rep.Models, report.ModelResult{Name: firstName(l.found), Path: l.found.Path, Error: l.err.Error()})
 			continue
 		}
-		if t.Owner != "" && (m.Owner == "" || t.Source == "ollama") {
-			m.Owner = t.Owner
-			m.Baseline, m.BaselineNote = model.Classify(m.Owner, m.Name)
+		rep.Models = append(rep.Models, report.Build(l.m, aliases(l.found), l.found.Extras, budget.GB, opts, info.BandwidthGBs, cal))
+	}
+	if *doMeasure {
+		if measured == 0 {
+			fmt.Fprintln(os.Stderr, "--measure: no installed Ollama models among the targets; nothing measured")
+		} else if err := cal.Save(*calibPath); err != nil {
+			return fmt.Errorf("saving calibration: %w", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "calibration saved to %s\n", *calibPath)
 		}
-		if len(t.Names) > 0 {
-			m.Name = t.Names[0]
-		}
-		rep.Models = append(rep.Models, report.Build(m, aliases(t), t.Extras, budget.GB, opts, info.BandwidthGBs))
 	}
 	if len(rep.Models) == 0 && !*doSuggest {
 		return errors.New("no models found; pass a .gguf path or an MLX directory, or use --suggest")
@@ -329,8 +401,8 @@ func parseContexts(s string) ([]uint64, error) {
 	for _, part := range strings.Split(s, ",") {
 		p := strings.ToLower(strings.TrimSpace(part))
 		mult := uint64(1)
-		if strings.HasSuffix(p, "k") {
-			mult, p = 1024, strings.TrimSuffix(p, "k")
+		if q, ok := strings.CutSuffix(p, "k"); ok {
+			mult, p = 1024, q
 		}
 		n, err := strconv.ParseUint(p, 10, 64)
 		if err != nil || n == 0 {

@@ -51,10 +51,14 @@ type TensorInfo struct {
 	Type uint32
 }
 
-// Elements is the number of scalar elements in the tensor.
+// Elements is the number of scalar elements in the tensor, or 0 if the
+// product of the dimensions does not fit in 64 bits (a corrupt header).
 func (t TensorInfo) Elements() uint64 {
 	n := uint64(1)
 	for _, d := range t.Dims {
+		if d != 0 && n > math.MaxUint64/d {
+			return 0
+		}
 		n *= d
 	}
 	return n

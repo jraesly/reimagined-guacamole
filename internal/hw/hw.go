@@ -53,8 +53,12 @@ func ParseDarwin(brand, memsize, wiredMB string) (Info, error) {
 	if err != nil {
 		return Info{}, fmt.Errorf("hw.memsize: %w", err)
 	}
-	in := Info{OS: "darwin", Chip: strings.TrimSpace(brand), RAMGB: float64(mem) / GiB, Unified: true}
-	if w, err := strconv.ParseFloat(strings.TrimSpace(wiredMB), 64); err == nil && w > 0 {
+	in := Info{OS: "darwin", Chip: strings.TrimSpace(brand), RAMGB: float64(mem) / GiB}
+	in.Unified = strings.Contains(in.Chip, "Apple")
+	if !in.Unified {
+		in.Notes = append(in.Notes, "Intel Mac: GPU memory is not detected; the budget assumes CPU inference from system RAM")
+	}
+	if w, err := strconv.ParseFloat(strings.TrimSpace(wiredMB), 64); err == nil && w > 0 && in.Unified {
 		in.WiredLimitGB = w / 1024
 	}
 	in.BandwidthGBs, in.BandwidthKnown = Bandwidth(in.Chip)
@@ -158,12 +162,15 @@ var bandwidthTable = []struct {
 }{
 	{"M1 Ultra", 800}, {"M1 Max", 400}, {"M1 Pro", 200}, {"M1", 68},
 	{"M2 Ultra", 800}, {"M2 Max", 400}, {"M2 Pro", 200}, {"M2", 100},
-	{"M3 Ultra", 800}, {"M3 Max", 400}, {"M3 Pro", 150}, {"M3", 100},
+	{"M3 Ultra", 819}, {"M3 Max", 400}, {"M3 Pro", 150}, {"M3", 100},
 	{"M4 Max", 546}, {"M4 Pro", 273}, {"M4", 120},
-	{"RTX 5090", 1792}, {"RTX 5080", 960},
-	{"RTX 4090", 1008}, {"RTX 4080", 717}, {"RTX 4070", 504},
-	{"RTX 3090", 936}, {"RTX 3080", 760},
-	{"RTX 6000 Ada", 960}, {"A100", 1935}, {"H100", 3350},
+	{"RTX 5090", 1792}, {"RTX 5080", 960}, {"RTX 5070 Ti", 896}, {"RTX 5070", 672}, {"RTX 5060 Ti", 448},
+	{"RTX 4090", 1008}, {"RTX 4080 Super", 736}, {"RTX 4080", 717}, {"RTX 4070 Ti Super", 672},
+	{"RTX 4070 Ti", 504}, {"RTX 4070 Super", 504}, {"RTX 4070", 504}, {"RTX 4060 Ti", 288},
+	{"RTX 3090 Ti", 1008}, {"RTX 3090", 936}, {"RTX 3080 Ti", 912}, {"RTX 3080", 760}, {"RTX 3070", 448},
+	{"RTX 6000 Ada", 960}, {"RTX A6000", 768}, {"L40S", 864}, {"L40", 864}, {"L4", 300},
+	{"A100", 1935}, {"H100", 3350}, {"H200", 4800},
+	{"RX 7900 XTX", 960}, {"RX 7900 XT", 800}, {"MI300X", 5300},
 }
 
 // Bandwidth looks up memory bandwidth by chip name.

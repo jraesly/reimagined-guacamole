@@ -43,6 +43,19 @@ func TestParseDarwinDefaultWiredLimitBindsOnBigMachines(t *testing.T) {
 	}
 }
 
+func TestParseDarwinIntelIsNotUnified(t *testing.T) {
+	in, err := ParseDarwin("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", "68719476736", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Unified || in.BandwidthKnown || len(in.Notes) == 0 {
+		t.Errorf("info = %+v", in)
+	}
+	if b := in.Budget(DefaultReserveGB(in)); b.Binding != "reserve" || b.GB != 62 {
+		t.Errorf("budget = %+v", b)
+	}
+}
+
 func TestParseDarwinBadMemsize(t *testing.T) {
 	if _, err := ParseDarwin("Apple M1", "lots", "0"); err == nil {
 		t.Error("expected error")

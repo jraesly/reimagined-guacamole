@@ -2,6 +2,7 @@ package fit
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/jraesly/reimagined-guacamole/internal/model"
@@ -117,6 +118,50 @@ func TestTableDefaults(t *testing.T) {
 	}
 	if _, ok := MaxContext([]Row{{Context: 8192, Verdict: No}}); ok {
 		t.Error("MaxContext should report false when nothing fits")
+	}
+}
+
+type fakeCal map[string]struct {
+	eff float64
+	n   int
+}
+
+func (f fakeCal) Effective(kind string) (float64, int) { v := f[kind]; return v.eff, v.n }
+
+func TestEstimatePrefersMachineCalibration(t *testing.T) {
+	m := qwen38()
+	m.ReadBytes, m.ReadBytesSource = 16_000_000_000, model.Measured
+	// No calibration: table basis.
+	s, ok := Estimate(m, 400, nil)
+	if !ok || !strings.Contains(s.Basis, "table") || s.Confidence != "medium" {
+		t.Errorf("table estimate = %+v", s)
+	}
+	// Calibrated: 180 GB/s effective over 16 GB/token = 11.25 tok/s.
+	s, ok = Estimate(m, 400, fakeCal{"dense": {180, 2}})
+	if !ok || !approx(s.TokPerSec, 11.25, 0.01) || s.Confidence != "high" || !strings.Contains(s.Basis, "2 measured dense") {
+		t.Errorf("calibrated estimate = %+v", s)
+	}
+	if s, _ := Estimate(m, 400, fakeCal{"dense": {180, 1}}); s.Confidence != "medium" {
+		t.Errorf("a single sample must not be high confidence: %+v", s)
+	}
+	// Context beyond the model's maximum is called out on the row.
+	m.ContextLength = 32768
+	rows, _ := Table(m, 24, Options{Contexts: []uint64{16384, 65536}})
+	if rows[0].Note != "" || !strings.Contains(rows[1].Note, "exceeds the model's 32k context") {
+		t.Errorf("notes = %q / %q", rows[0].Note, rows[1].Note)
+	}
+	// Calibration for the other kind only does not apply.
+	s, _ = Estimate(m, 400, fakeCal{"moe": {50, 1}})
+	if !strings.Contains(s.Basis, "table") {
+		t.Errorf("kind mismatch should fall back to table: %+v", s)
+	}
+	// Unknown bandwidth and no calibration: no estimate at all.
+	if _, ok := Estimate(m, 0, nil); ok {
+		t.Error("no basis should yield no estimate")
+	}
+	// Unknown bandwidth but calibrated: still an estimate.
+	if s, ok := Estimate(m, 0, fakeCal{"dense": {180, 1}}); !ok || s.TokPerSec == 0 {
+		t.Errorf("calibration should not need the bandwidth table: %+v %v", s, ok)
 	}
 }
 
