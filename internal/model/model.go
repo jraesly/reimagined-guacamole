@@ -57,6 +57,8 @@ type Model struct {
 	// "vision" when a projector accompanies it (set by the caller),
 	// "embedding" for encoder architectures.
 	Tasks        []string
+	Host         string // runtime that serves it ("ollama", "lmstudio"), when known
+	Digest       string // content digest of the weights when the host exposes one (Ollama sha256)
 	Owner        string
 	Baseline     bool
 	BaselineNote string
@@ -353,6 +355,15 @@ func tasksFromHeader(h *gguf.Header) []string {
 	if strings.Contains(tmpl, "tool") {
 		tasks = append(tasks, "agent", "coding")
 	}
+	// Some multimodal models carry the vision encoder inside the same GGUF
+	// instead of a separate mmproj file; its hyperparameters are namespaced
+	// under <arch>.vision.* or clip.*.
+	for k := range h.Metadata {
+		if strings.Contains(k, ".vision.") || strings.HasPrefix(k, "clip.") {
+			tasks = append(tasks, "vision")
+			break
+		}
+	}
 	return tasks
 }
 
@@ -590,6 +601,11 @@ var baselineOwners = map[string]bool{
 // variantMarkers are words that only appear in community fine-tunes/merges.
 var variantMarkers = []string{"uncensored", "heretic", "abliterated", "fusion", "merge", "roleplay", "neo-", "turbo"}
 
+// quantizers republish other people's weights. They name vendor models
+// plainly (Qwen3.8-27B-GGUF) and third-party ones with the source owner as
+// a prefix (ukisai_Swift-Qwen3.8-27b-GGUF), so the prefix decides.
+var quantizers = map[string]bool{"bartowski": true, "unsloth": true, "lmstudio-community": true, "mradermacher": true}
+
 // Classify decides whether a model is a baseline or a community variant.
 func Classify(owner, name string) (bool, string) {
 	lower := strings.ToLower(name)
@@ -600,6 +616,12 @@ func Classify(owner, name string) (bool, string) {
 	}
 	if owner == "" {
 		return false, "publisher unknown — cannot confirm this is a baseline"
+	}
+	if quantizers[strings.ToLower(owner)] {
+		base := strings.TrimSuffix(strings.TrimSuffix(name, "-GGUF"), "-gguf")
+		if src, _, ok := strings.Cut(base, "_"); ok && !baselineOwners[strings.ToLower(src)] && !strings.ContainsAny(src, "-. ") {
+			return false, fmt.Sprintf("variant (%s quantized %s's weights) — compare against the base model before trusting it", owner, src)
+		}
 	}
 	if baselineOwners[strings.ToLower(owner)] {
 		return true, "baseline (" + owner + ")"

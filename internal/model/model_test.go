@@ -394,6 +394,12 @@ func TestTasksFromHeader(t *testing.T) {
 	if n := len(m.Tasks); n != 4 {
 		t.Errorf("AddTask should be idempotent, tasks = %v", m.Tasks)
 	}
+	f.Metadata["qwen35.vision.block_count"] = uint32(24)
+	writeFixture(t, p, f, 0)
+	m, _ = FromGGUF(p)
+	if !m.HasTask("vision") {
+		t.Errorf("embedded vision encoder keys should tag vision, tasks = %v", m.Tasks)
+	}
 	e := dense()
 	e.Metadata["general.architecture"] = "nomic-bert"
 	for k, v := range map[string]any{"nomic-bert.block_count": uint32(12), "nomic-bert.attention.head_count": uint32(12),
@@ -497,6 +503,10 @@ func TestClassify(t *testing.T) {
 		{"unsloth", "Qwen3.8-27B-Uncensored", false},
 		{"", "Qwen3.8-27B", false},
 		{"someone", "Qwen3.8-27B", false},
+		{"bartowski", "Qwen3.8-27B-GGUF", true},
+		{"bartowski", "ukisai_Swift-Qwen3.8-27b-GGUF", false}, // quantized a third party's fine-tune
+		{"bartowski", "Qwen_Qwen3.8-27B-GGUF", true},          // quantized the vendor's own weights
+		{"mradermacher", "Qwen3.8-27B-i1-GGUF", false},        // not on the allowlist at all
 	}
 	for _, c := range cases {
 		got, note := Classify(c.owner, c.name)

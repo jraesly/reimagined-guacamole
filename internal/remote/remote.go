@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,6 +128,9 @@ func resolveOllama(ctx context.Context, r Ref) (*model.Model, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		if tags, terr := OllamaTags(ctx, r.Owner, r.Name); terr == nil && len(tags) > 0 {
+			return nil, fmt.Errorf("%s: no %q tag; available: %s", r, r.Tag, strings.Join(tags, ", "))
+		}
 		return nil, fmt.Errorf("%s: not found in the Ollama registry", r)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -161,10 +165,73 @@ func resolveOllama(ctx context.Context, r Ref) (*model.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	mdl.Host = "ollama"
+	mdl.Digest = digest
 	if projector > 0 {
+		mdl.AddTask("vision")
 		mdl.Warnings = append(mdl.Warnings, fmt.Sprintf("pull also includes a %.1f GB vision projector", float64(projector)/1e9))
 	}
 	return mdl, nil
+}
+
+// isModelGGUF excludes companion GGUFs that are not the model: vision
+// projectors (mmproj-*) and speculative/multi-token-prediction draft heads
+// (mtp-*, */MTP/*), which are tiny and would otherwise win the quant choice.
+func isModelGGUF(path string) bool {
+	if !strings.HasSuffix(path, ".gguf") {
+		return false
+	}
+	lower := strings.ToLower(path)
+	base := lower[strings.LastIndex(lower, "/")+1:]
+	return !strings.Contains(lower, "mmproj") && !strings.HasPrefix(base, "mtp") && !strings.Contains(lower, "/mtp/") && !strings.Contains(base, "imatrix")
+}
+
+// hasProjector reports whether a repo listing carries a vision projector.
+func hasProjector(entries []hfEntry) bool {
+	for _, e := range entries {
+		if e.Type == "file" && strings.Contains(strings.ToLower(e.Path), "mmproj") {
+			return true
+		}
+	}
+	return false
+}
+
+// OllamaTags lists a model's tags from the registry.
+func OllamaTags(ctx context.Context, owner, name string) ([]string, error) {
+	body, err := get(ctx, fmt.Sprintf("%s/v2/%s/%s/tags/list", OllamaRegistry, owner, name), 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil {
+		return nil, err
+	}
+	sort.Strings(v.Tags)
+	return v.Tags, nil
+}
+
+// SmallestSizeTag picks the tag naming the fewest parameters ("4b" before
+// "27b"), which is the safest first thing to fit; "" if none looks like a
+// size.
+func SmallestSizeTag(tags []string) string {
+	best, bestB := "", 0.0
+	for _, t := range tags {
+		tl := strings.ToLower(t)
+		num := strings.TrimSuffix(strings.TrimPrefix(tl, "e"), "b")
+		if i := strings.Index(num, "x"); i > 0 { // 8x7b style
+			num = num[i+1:]
+		}
+		f, err := strconv.ParseFloat(num, 64)
+		if err != nil || !strings.HasSuffix(tl, "b") {
+			continue
+		}
+		if best == "" || f < bestB {
+			best, bestB = t, f
+		}
+	}
+	return best
 }
 
 type hfEntry struct {
@@ -175,13 +242,9 @@ type hfEntry struct {
 
 func resolveHF(ctx context.Context, r Ref) (*model.Model, error) {
 	repo := r.Owner + "/" + r.Name
-	body, err := get(ctx, fmt.Sprintf("%s/api/models/%s/tree/main", HFBase, repo), 4<<20)
+	entries, err := hfTree(ctx, repo)
 	if err != nil {
-		return nil, fmt.Errorf("hf:%s: %w", repo, err)
-	}
-	var entries []hfEntry
-	if err := json.Unmarshal(body, &entries); err != nil {
-		return nil, fmt.Errorf("hf:%s: file listing: %w", repo, err)
+		return nil, err
 	}
 	var ggufs []hfEntry
 	var safetensors uint64
@@ -189,7 +252,7 @@ func resolveHF(ctx context.Context, r Ref) (*model.Model, error) {
 	for _, e := range entries {
 		switch {
 		case e.Type != "file":
-		case strings.HasSuffix(e.Path, ".gguf") && !strings.Contains(e.Path, "mmproj"):
+		case isModelGGUF(e.Path):
 			ggufs = append(ggufs, e)
 		case e.Path == "config.json":
 			hasConfig = true
@@ -207,7 +270,14 @@ func resolveHF(ctx context.Context, r Ref) (*model.Model, error) {
 		if err != nil {
 			return nil, fmt.Errorf("hf:%s: %w", repo, err)
 		}
-		return model.FromHeader(h, r.String(), repo+"/"+first.Path, total, r.Owner, partial)
+		mdl, err := model.FromHeader(h, r.String(), repo+"/"+first.Path, total, r.Owner, partial)
+		if err != nil {
+			return nil, err
+		}
+		if hasProjector(entries) {
+			mdl.AddTask("vision")
+		}
+		return mdl, nil
 	}
 	if hasConfig && safetensors > 0 {
 		raw, err := get(ctx, fmt.Sprintf("%s/%s/resolve/main/config.json", HFBase, repo), 1<<20)
@@ -232,17 +302,13 @@ func ResolveAll(ctx context.Context, r Ref) (models []*model.Model, errs []error
 		return nil, nil, fmt.Errorf("--all-quants needs an hf:<owner>/<repo> target, got %s", r)
 	}
 	repo := r.Owner + "/" + r.Name
-	body, err := get(ctx, fmt.Sprintf("%s/api/models/%s/tree/main", HFBase, repo), 4<<20)
+	entries, err := hfTree(ctx, repo)
 	if err != nil {
-		return nil, nil, fmt.Errorf("hf:%s: %w", repo, err)
-	}
-	var entries []hfEntry
-	if err := json.Unmarshal(body, &entries); err != nil {
-		return nil, nil, fmt.Errorf("hf:%s: file listing: %w", repo, err)
+		return nil, nil, err
 	}
 	var ggufs []hfEntry
 	for _, e := range entries {
-		if e.Type == "file" && strings.HasSuffix(e.Path, ".gguf") && !strings.Contains(e.Path, "mmproj") &&
+		if e.Type == "file" && isModelGGUF(e.Path) &&
 			(r.Tag == "" || strings.Contains(strings.ToLower(e.Path), strings.ToLower(r.Tag))) {
 			ggufs = append(ggufs, e)
 		}
@@ -267,6 +333,9 @@ func ResolveAll(ctx context.Context, r Ref) (models []*model.Model, errs []error
 			errs = append(errs, merr)
 			continue
 		}
+		if hasProjector(entries) {
+			m.AddTask("vision")
+		}
 		models = append(models, m)
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].WeightsBytes < models[j].WeightsBytes })
@@ -278,6 +347,20 @@ func filterNote(filter string) string {
 		return ""
 	}
 	return fmt.Sprintf(" matching %q", filter)
+}
+
+// hfTree lists every file in a repo, including those in subfolders (Unsloth
+// keeps large quants in per-quant directories).
+func hfTree(ctx context.Context, repo string) ([]hfEntry, error) {
+	body, err := get(ctx, fmt.Sprintf("%s/api/models/%s/tree/main?recursive=true", HFBase, repo), 8<<20)
+	if err != nil {
+		return nil, fmt.Errorf("hf:%s: %w", repo, err)
+	}
+	var entries []hfEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, fmt.Errorf("hf:%s: file listing: %w", repo, err)
+	}
+	return entries, nil
 }
 
 // preferredQuants is the order tried when the user gives no file filter.

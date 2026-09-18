@@ -119,13 +119,23 @@ func (f *File) Lookup(names ...string) (Sample, bool) {
 }
 
 // Effective returns the median effective bandwidth over samples of a kind
-// and how many samples contributed.
-func (f *File) Effective(kind string) (float64, int) {
-	var v []float64
-	for _, s := range f.Samples {
-		if s.Kind == kind && s.TokPerSec > 0 && s.BytesPerToken > 0 {
-			v = append(v, s.EffectiveGBs())
+// and how many samples contributed. Samples from the same backend are
+// preferred: Ollama and LM Studio run different llama.cpp builds and settings,
+// so their efficiencies differ. With no same-backend sample, all backends
+// count.
+func (f *File) Effective(kind, backend string) (float64, int) {
+	collect := func(sameBackend bool) []float64 {
+		var v []float64
+		for _, s := range f.Samples {
+			if s.Kind == kind && s.TokPerSec > 0 && s.BytesPerToken > 0 && (!sameBackend || s.Backend == backend) {
+				v = append(v, s.EffectiveGBs())
+			}
 		}
+		return v
+	}
+	v := collect(backend != "")
+	if len(v) == 0 {
+		v = collect(false)
 	}
 	if len(v) == 0 {
 		return 0, 0

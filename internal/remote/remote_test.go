@@ -152,6 +152,9 @@ func TestResolveOllama(t *testing.T) {
 	if !m.Remote || m.Name != "qwen3.8:27b" || m.WeightsBytes != 16810714464 || m.Params != 27_300_000_000 || !m.Baseline {
 		t.Errorf("model = %+v", m)
 	}
+	if !m.HasTask("vision") || m.Host != "ollama" {
+		t.Errorf("projector layer should tag vision and host ollama: tasks=%v host=%q", m.Tasks, m.Host)
+	}
 	if len(m.Warnings) == 0 || !strings.Contains(m.Warnings[len(m.Warnings)-1], "vision projector") {
 		t.Errorf("expected projector warning, got %v", m.Warnings)
 	}
@@ -164,6 +167,37 @@ func TestResolveOllama(t *testing.T) {
 	}
 	if _, err := Resolve(context.Background(), Ref{Host: "ollama", Owner: "library", Name: "missing", Tag: "latest"}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("missing: %v", err)
+	}
+	if m.Digest != "sha256:mm" {
+		t.Errorf("digest = %q", m.Digest)
+	}
+}
+
+func TestOllamaTagsAndSmallestSize(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/library/ornith-1.5/tags/list", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"ornith-1.5","tags":["397b","35b","9b","9b-q8_0"]}`))
+	})
+	mux.HandleFunc("/v2/library/ornith-1.5/manifests/latest", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	OllamaRegistry = srv.URL
+	tags, err := OllamaTags(context.Background(), "library", "ornith-1.5")
+	if err != nil || len(tags) != 4 {
+		t.Fatalf("tags=%v err=%v", tags, err)
+	}
+	if got := SmallestSizeTag(tags); got != "9b" {
+		t.Errorf("smallest = %q", got)
+	}
+	if got := SmallestSizeTag([]string{"latest", "8x7b", "e2b", "12b"}); got != "e2b" {
+		t.Errorf("smallest with e-prefix = %q", got)
+	}
+	if got := SmallestSizeTag([]string{"latest", "instruct"}); got != "" {
+		t.Errorf("no size tags should give empty, got %q", got)
+	}
+	_, err = Resolve(context.Background(), Ref{Host: "ollama", Owner: "library", Name: "ornith-1.5", Tag: "latest"})
+	if err == nil || !strings.Contains(err.Error(), "available: 35b, 397b, 9b, 9b-q8_0") {
+		t.Errorf("missing tag should list alternatives: %v", err)
 	}
 }
 
@@ -179,6 +213,9 @@ func TestResolveHFGGUFShardedAndFilter(t *testing.T) {
 		{"type": "file", "path": "Q-Q8_0.gguf", "size": 5000},
 	}
 	mux.HandleFunc("/api/models/unsloth/Q/tree/main", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("recursive") != "true" {
+			t.Error("tree listing must be recursive so quants in subfolders are found")
+		}
 		_ = json.NewEncoder(w).Encode(tree)
 	})
 	serveBlob(t, mux, "/unsloth/Q/resolve/main/Q-UD-Q4_K_XL-00001-of-00002.gguf", blob, &ranges)
@@ -195,6 +232,9 @@ func TestResolveHFGGUFShardedAndFilter(t *testing.T) {
 	}
 	if m.WeightsBytes != 3000 || !strings.HasSuffix(m.Name, "00001-of-00002.gguf") || m.ParamsSource != "inferred" {
 		t.Errorf("model = %+v", m)
+	}
+	if !m.HasTask("vision") {
+		t.Errorf("repo with an mmproj file should be tagged vision, tasks = %v", m.Tasks)
 	}
 	// Explicit filter picks the Q8_0 single file.
 	m, err = Resolve(context.Background(), Ref{Host: "hf", Owner: "unsloth", Name: "Q", Tag: "q8_0"})
@@ -238,7 +278,7 @@ func TestResolveAllQuants(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(models) != 3 || len(errs) != 1 {
-		t.Fatalf("models=%d errs=%v", len(models), errs)
+		t.Fatalf("models=%d errs=%v (mmproj, MTP draft head and imatrix must be skipped)", len(models), errs)
 	}
 	// sorted by size: Q2_K (500), the sharded XL (3000), Q8_0 (5000); mmproj skipped; broken reported.
 	if models[0].WeightsBytes != 500 || models[1].WeightsBytes != 3000 || models[2].WeightsBytes != 5000 {

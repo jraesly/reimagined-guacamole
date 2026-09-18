@@ -126,7 +126,13 @@ type fakeCal map[string]struct {
 	n   int
 }
 
-func (f fakeCal) Effective(kind string) (float64, int) { v := f[kind]; return v.eff, v.n }
+func (f fakeCal) Effective(kind, backend string) (float64, int) {
+	if v, ok := f[kind+"@"+backend]; ok {
+		return v.eff, v.n
+	}
+	v := f[kind]
+	return v.eff, v.n
+}
 
 func TestEstimatePrefersMachineCalibration(t *testing.T) {
 	m := qwen38()
@@ -144,6 +150,12 @@ func TestEstimatePrefersMachineCalibration(t *testing.T) {
 	if s, _ := Estimate(m, 400, fakeCal{"dense": {180, 1}}); s.Confidence != "medium" {
 		t.Errorf("a single sample must not be high confidence: %+v", s)
 	}
+	// The model's own host is passed through so same-backend samples win.
+	m.Host = "lmstudio"
+	if s, _ := Estimate(m, 400, fakeCal{"dense": {180, 3}, "dense@lmstudio": {160, 1}}); !approx(s.TokPerSec, 10, 0.01) || !strings.Contains(s.Basis, "via lmstudio") {
+		t.Errorf("host-specific calibration = %+v", s)
+	}
+	m.Host = ""
 	// Context beyond the model's maximum is called out on the row.
 	m.ContextLength = 32768
 	rows, _ := Table(m, 24, Options{Contexts: []uint64{16384, 65536}})

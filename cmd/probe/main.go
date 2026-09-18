@@ -24,6 +24,7 @@ import (
 	"github.com/jraesly/reimagined-guacamole/internal/remote"
 	"github.com/jraesly/reimagined-guacamole/internal/report"
 	"github.com/jraesly/reimagined-guacamole/internal/scan"
+	"github.com/jraesly/reimagined-guacamole/internal/search"
 	"github.com/jraesly/reimagined-guacamole/internal/suggest"
 )
 
@@ -89,6 +90,8 @@ func runFit(args []string) error {
 	forTask := fs.String("for", "", "keep only models for this task (coding, agent, chat, vision, embedding); also filters --suggest")
 	allQuants := fs.Bool("all-quants", false, "for an hf:<owner>/<repo> target, fit every GGUF quant in the repo and print one row per quant")
 	activationGB := fs.Float64("activation-gb", 0, "with --for image|video|tts|speech: activation memory to add to the weights, from your own runs")
+	limit := fs.Int("limit", 6, "with --suggest --online --for <task>: how many online search hits to fit")
+	variants := fs.Bool("variants", false, "with --suggest --online: include community fine-tunes in the online search (baselines only by default)")
 	doMeasure := fs.Bool("measure", false, "run each installed Ollama model briefly and record its measured decode speed for calibration")
 	measureCtx := fs.Int("measure-ctx", 4096, "context size used for --measure runs")
 	measureTokens := fs.Int("measure-tokens", 128, "tokens generated per --measure run")
@@ -246,13 +249,35 @@ func runFit(args []string) error {
 	}
 	rep := report.Report{Hardware: info, Budget: budget, KV: kvType}
 	ctx := context.Background()
-	addRemote := func(r remote.Ref) {
+	task := strings.ToLower(strings.TrimSpace(*forTask))
+	// Installed Ollama blobs by digest, so a remote hit that is the same
+	// weights under another tag is reported as installed, not as a pull.
+	installedDigest := map[string]string{}
+	for _, t := range targets {
+		if t.Source == "ollama" && strings.HasPrefix(filepath.Base(t.Path), "sha256-") && len(t.Names) > 0 {
+			installedDigest["sha256:"+strings.TrimPrefix(filepath.Base(t.Path), "sha256-")] = t.Names[0]
+		}
+	}
+	// addRemote fits a registry reference; extra tasks come from the source
+	// that found it (a search page's capability tags), since a header alone
+	// cannot always tell.
+	addRemote := func(r remote.Ref, extra ...string) {
 		m, err := remote.Resolve(ctx, r)
 		if err != nil {
 			rep.Models = append(rep.Models, report.ModelResult{Name: r.String(), Path: r.String(), Error: err.Error()})
 			return
 		}
-		rep.Models = append(rep.Models, report.Build(m, nil, nil, budget.GB, opts, info.BandwidthGBs, cal))
+		for _, t := range extra {
+			m.AddTask(t)
+		}
+		if task != "" && !m.HasTask(task) {
+			return
+		}
+		res := report.Build(m, nil, nil, budget.GB, opts, info.BandwidthGBs, cal)
+		if name, ok := installedDigest[m.Digest]; ok {
+			res.InstalledAs = name
+		}
+		rep.Models = append(rep.Models, res)
 	}
 	if *allQuants {
 		if len(refs) != 1 || refs[0].Host != "hf" {
@@ -271,7 +296,7 @@ func runFit(args []string) error {
 		if *asJSON {
 			return report.WriteJSON(os.Stdout, rep)
 		}
-		report.WriteQuantTable(os.Stdout, rep, "hf:"+refs[0].Owner+"/"+refs[0].Name)
+		report.WriteCompactTable(os.Stdout, rep, "hf:"+refs[0].Owner+"/"+refs[0].Name+" — one row per quant")
 		return nil
 	}
 	for _, r := range refs {
@@ -303,6 +328,9 @@ func runFit(args []string) error {
 			}
 			if t.Vision {
 				m.AddTask("vision")
+			}
+			if t.Source == "ollama" || t.Source == "lmstudio" {
+				m.Host = t.Source
 			}
 			if task := strings.ToLower(strings.TrimSpace(*forTask)); task != "" && !m.HasTask(task) {
 				continue // not for this task; leave it out of the report
@@ -387,12 +415,53 @@ func runFit(args []string) error {
 						addRemote(r)
 					}
 				}
+				// The curated list is a handful of baselines; a task also
+				// deserves a live look at what the registries have now.
+				if task != "" {
+					hits, errs := search.Find(ctx, task, *limit, *variants)
+					for _, e := range errs {
+						fmt.Fprintln(os.Stderr, "probe: online search:", e)
+					}
+					rep.SearchTask = task
+					seen := map[string]bool{}
+					for _, m := range rep.Models {
+						seen[m.Name] = true
+						seen[m.Path] = true
+					}
+					for _, h := range hits {
+						ref := h.Ref
+						// ollama.com lists sizes, not tags; not every model has
+						// "latest". Fit the smallest size first — it is the one
+						// most likely to fit, and the table shows the rest.
+						if r, ok := remote.ParseRef(ref); ok && r.Host == "ollama" && r.Tag == "latest" {
+							if tag := remote.SmallestSizeTag(h.Sizes); tag != "" {
+								r.Tag = tag
+								ref = r.String()
+							}
+						}
+						rep.SearchHits = append(rep.SearchHits, report.SearchHit{Ref: ref, Name: h.Name, Source: h.Source, Description: h.Description, Downloads: h.Downloads, Capabilities: h.Capabilities})
+						if r, ok := remote.ParseRef(ref); ok && h.FitsOffline && !seen[h.Name] && !installed[h.Name] {
+							addRemote(r, tasksFromCapabilities(h.Capabilities)...)
+						}
+					}
+				}
 			}
 		}
 	}
 
 	if *asJSON {
 		return report.WriteJSON(os.Stdout, rep)
+	}
+	if *doSuggest {
+		// One row per model reads better than full blocks when the point
+		// is to compare candidates.
+		title := "Installed and suggested models"
+		if task != "" {
+			title += " for " + task
+		}
+		report.WriteCompactTable(os.Stdout, rep, title)
+		report.WriteSuggestions(os.Stdout, rep)
+		return nil
 	}
 	report.WriteText(os.Stdout, rep)
 	return nil
@@ -473,6 +542,22 @@ func resolveTargets(paths []string) ([]scan.Found, error) {
 		out = append(out, scan.Found{Path: p})
 	}
 	return out, nil
+}
+
+// tasksFromCapabilities maps a registry's capability tags onto probe tasks.
+func tasksFromCapabilities(caps []string) []string {
+	var out []string
+	for _, c := range caps {
+		switch c {
+		case "vision":
+			out = append(out, "vision")
+		case "tools":
+			out = append(out, "agent", "coding")
+		case "embedding":
+			out = append(out, "embedding")
+		}
+	}
+	return out
 }
 
 // detectHosts reports which model hosts this machine has: "ollama" when the

@@ -33,6 +33,16 @@ func TestDetectHostsAndFilter(t *testing.T) {
 	}
 }
 
+func TestTasksFromCapabilities(t *testing.T) {
+	got := tasksFromCapabilities([]string{"vision", "tools", "thinking", "cloud", "embedding"})
+	if !reflect.DeepEqual(got, []string{"vision", "agent", "coding", "embedding"}) {
+		t.Errorf("got %v", got)
+	}
+	if tasksFromCapabilities(nil) != nil {
+		t.Error("no capabilities should give no tasks")
+	}
+}
+
 func TestParseInterleaved(t *testing.T) {
 	fs := flag.NewFlagSet("t", flag.ContinueOnError)
 	all := fs.Bool("all-quants", false, "")

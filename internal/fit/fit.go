@@ -159,8 +159,9 @@ type Speed struct {
 // Calibration is what the machine has measured so far; nil means none.
 type Calibration interface {
 	// Effective returns the median effective bandwidth (GB/s actually
-	// achieved) for a model kind and how many samples back it.
-	Effective(kind string) (float64, int)
+	// achieved) for a model kind, preferring samples from the given backend
+	// ("" for any), and how many samples back it.
+	Effective(kind, backend string) (float64, int)
 }
 
 // Kind classifies a model for calibration purposes.
@@ -180,16 +181,20 @@ func Estimate(m *model.Model, bandwidthGBs float64, cal Calibration) (Speed, boo
 		return Speed{}, false
 	}
 	if cal != nil {
-		if eff, n := cal.Effective(Kind(m)); n > 0 {
+		if eff, n := cal.Effective(Kind(m), m.Host); n > 0 {
 			// One run on one model is a data point, not a calibration.
 			conf := "medium"
 			if n >= 2 && !m.IsMoE() {
 				conf = "high"
 			}
+			where := "on this machine"
+			if m.Host != "" {
+				where = "on this machine via " + m.Host
+			}
 			return Speed{
 				TokPerSec:  eff / (bytesPerTok / 1e9),
 				Confidence: conf,
-				Basis:      fmt.Sprintf("calibrated from %d measured %s run(s) on this machine", n, Kind(m)),
+				Basis:      fmt.Sprintf("calibrated from %d measured %s run(s) %s", n, Kind(m), where),
 			}, true
 		}
 	}

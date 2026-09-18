@@ -37,16 +37,37 @@ func TestWriteQuantTable(t *testing.T) {
 	broken := ModelResult{Name: "Q-broken.gguf", Error: "not a GGUF file"}
 	r.Models = []ModelResult{r.Models[0], q8, broken}
 	r.Models[0].Name, r.Models[0].Quant = "Q-Q4_K_M.gguf", "Q4_K_M"
+	r.Models[1].Remote = true
 	var b bytes.Buffer
-	WriteQuantTable(&b, r, "unsloth/Q")
+	WriteCompactTable(&b, r, "unsloth/Q")
 	out := b.String()
-	for _, want := range []string{"file", "quant", "32k", "1024k", "est tok/s", "Q-Q4_K_M.gguf", "Q4_K_M", "Q-Q8_0.gguf", "yes", "no", "~11", "error: not a GGUF file", "tight = within 10%"} {
+	for _, want := range []string{"model", "quant", "32k", "1024k", "tok/s", "for", "status", "Q-Q4_K_M.gguf", "Q4_K_M", "Q-Q8_0.gguf", "yes", "no", "~11", "installed", "pull 15.7 GB", "error: not a GGUF file", "tight = within 10%"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("quant table missing %q:\n%s", want, out)
 		}
 	}
 	if strings.Count(out, "\n") > 12 {
 		t.Errorf("table should be compact, got %d lines:\n%s", strings.Count(out, "\n"), out)
+	}
+}
+
+func TestWriteSuggestionsWithSearchHits(t *testing.T) {
+	r := Report{SearchTask: "coding", SearchHits: []SearchHit{
+		{Ref: "ollama:qwen3.8:latest", Name: "qwen3.8", Source: "ollama.com", Downloads: 2_000_000, Capabilities: []string{"vision", "tools"}, Description: strings.Repeat("long description ", 10)},
+		{Ref: "hf:unsloth/Qwen3.8-27B-GGUF", Name: "unsloth/Qwen3.8-27B-GGUF", Source: "huggingface", Downloads: 500_000},
+	}, ListNote: "note"}
+	var b bytes.Buffer
+	WriteSuggestions(&b, r)
+	out := b.String()
+	for _, want := range []string{"Online search for coding", "ollama:qwen3.8:latest", "2,000,000", "vision,tools", "…", "hf:unsloth/Qwen3.8-27B-GGUF", "500,000", "\nnote\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	b.Reset()
+	WriteSuggestions(&b, Report{SearchTask: "coding"})
+	if !strings.Contains(b.String(), "returned nothing usable") {
+		t.Errorf("empty search note missing:\n%s", b.String())
 	}
 }
 
@@ -69,6 +90,9 @@ func TestBuildUsesCalibration(t *testing.T) {
 	if !strings.Contains(b.String(), "decode: 11.3 tok/s measured (ollama, 4k context, 2026-09-17)") {
 		t.Errorf("text missing measured line:\n%s", b.String())
 	}
+	if strings.Contains(b.String(), "decode estimate") {
+		t.Errorf("a measured model must not also print an estimate:\n%s", b.String())
+	}
 }
 
 func TestWriteTextContainsKeyFacts(t *testing.T) {
@@ -84,7 +108,7 @@ func TestWriteTextContainsKeyFacts(t *testing.T) {
 		"32k", "1024k", "yes", "no",
 		"max context that fits: 32k",
 		"decode estimate: ~11 tok/s (inferred, medium confidence",
-		"reclaimable: /x/mmproj-F32.gguf",
+		"companion: /x/mmproj-F32.gguf",
 		"warning: general.parameter_count missing",
 	} {
 		if !strings.Contains(out, want) {

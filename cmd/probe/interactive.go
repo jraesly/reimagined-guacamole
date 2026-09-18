@@ -22,7 +22,7 @@ var menu = []struct {
 	hint  string
 }{
 	{"What fits on this machine", "probe fit"},
-	{"Find a model for a task", "probe fit --suggest --online --for <task>"},
+	{"Find a model for a task (searches online)", "probe fit --suggest --online --for <task>"},
 	{"Measure my installed models", "probe fit --measure"},
 	{"Watch what my coding harness sends", "probe capture --upstream <server>"},
 	{"Image / video / TTS / speech models here", "probe fit --for image|video|tts|speech"},
@@ -56,9 +56,12 @@ func runInteractive(in io.Reader, out io.Writer) error {
 				return nil
 			}
 			args := []string{"--suggest", "--online"}
-			if task != "" {
-				args = append(args, "--for", task)
+			if task == "" {
+				task = "coding"
+				fmt.Fprintln(out, "(no task picked; searching for coding models)")
 			}
+			args = append(args, "--for", task)
+			fmt.Fprintln(out, "Searching Hugging Face and ollama.com, then fitting the top hits from their headers (nothing is downloaded)…")
 			if err := runFit(args); err != nil {
 				fmt.Fprintln(out, "probe:", err)
 			}
