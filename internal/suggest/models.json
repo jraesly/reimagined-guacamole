@@ -1,43 +1,43 @@
 {
   "updated": "2026-09-17",
-  "note": "Curated, not measured. Baseline models from vendor or faithful-quant publishers only; no fine-tunes. Entries come from the Ollama library and Hugging Face as of the update date and have not been benchmarked by probe. Speed and quality claims are the publishers' own. Run with --online to fit each entry from its registry header.",
+  "note": "Curated, not measured. Baseline models from vendor or faithful-quant publishers only; no fine-tunes. Entries come from the Ollama library and Hugging Face as of the update date and have not been benchmarked by probe. Speed and quality claims are the publishers' own; task tags follow the publishers' stated capabilities (tools, thinking, vision). Run with --online to fit each entry from its registry header.",
   "classes": [
     {
       "name": "<= 16 GB",
       "max_gb": 16,
       "models": [
-        {"name": "qwen3.5:9b", "shape": "dense 9B", "why": "smallest current Qwen with tools + thinking", "pull": "ollama pull qwen3.5:9b", "host": "ollama", "ref": "ollama:qwen3.5:9b"},
-        {"name": "lfm2.5", "shape": "MoE 8B-A1B", "why": "edge model built for fast, reliable tool calling", "pull": "ollama pull lfm2.5", "host": "ollama", "ref": "ollama:lfm2.5:latest"},
-        {"name": "nemotron-3-nano:4b", "shape": "dense 4B", "why": "tiny agentic baseline; fits beside a browser", "pull": "ollama pull nemotron-3-nano:4b", "host": "ollama", "ref": "ollama:nemotron-3-nano:4b"}
+        {"name": "qwen3.5:9b", "shape": "dense 9B", "why": "smallest current Qwen with tools + thinking + vision", "pull": "ollama pull qwen3.5:9b", "host": "ollama", "ref": "ollama:qwen3.5:9b", "tasks": ["coding", "agent", "chat", "vision"]},
+        {"name": "lfm2.5", "shape": "MoE 8B-A1B", "why": "edge model built for fast, reliable tool calling", "pull": "ollama pull lfm2.5", "host": "ollama", "ref": "ollama:lfm2.5:latest", "tasks": ["agent", "chat"]},
+        {"name": "nemotron-3-nano:4b", "shape": "dense 4B", "why": "tiny agentic baseline; fits beside a browser", "pull": "ollama pull nemotron-3-nano:4b", "host": "ollama", "ref": "ollama:nemotron-3-nano:4b", "tasks": ["coding", "agent", "chat"]}
       ]
     },
     {
       "name": "24-32 GB",
       "max_gb": 32,
       "models": [
-        {"name": "qwen3.8:27b", "shape": "dense 27B", "why": "quality baseline; keep context <= 64k on 32 GB", "pull": "ollama pull qwen3.8:27b", "host": "ollama", "ref": "ollama:qwen3.8:27b"},
-        {"name": "qwen3.6:35b", "shape": "MoE 35B-A3B", "why": "speed baseline from the same family; ~2x the dense decode rate", "pull": "ollama pull qwen3.6:35b", "host": "ollama", "ref": "ollama:qwen3.6:35b"},
-        {"name": "laguna-xs-2.1", "shape": "MoE 33B-A3B", "why": "publisher describes it as built for agentic coding on a local machine", "pull": "ollama pull laguna-xs-2.1", "host": "ollama", "ref": "ollama:laguna-xs-2.1:latest"},
-        {"name": "nemotron-3.5-lightning", "shape": "MoE 30B-A3B", "why": "NVIDIA's always-on-agent model; alternative A3B", "pull": "ollama pull nemotron-3.5-lightning", "host": "ollama", "ref": "ollama:nemotron-3.5-lightning:latest"},
-        {"name": "unsloth/Qwen3.8-27B-GGUF (UD-Q4_K_XL)", "shape": "dense 27B", "why": "the same quality baseline as an Unsloth dynamic quant for LM Studio / llama.cpp", "pull": "LM Studio: search unsloth/Qwen3.8-27B-GGUF, choose UD-Q4_K_XL", "host": "hf", "ref": "hf:unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"}
+        {"name": "qwen3.8:27b", "shape": "dense 27B", "why": "quality baseline; keep context <= 64k on 32 GB", "pull": "ollama pull qwen3.8:27b", "host": "ollama", "ref": "ollama:qwen3.8:27b", "tasks": ["coding", "agent", "chat", "vision"]},
+        {"name": "qwen3.6:35b", "shape": "MoE 35B-A3B", "why": "speed baseline from the same family; ~4x the dense decode rate", "pull": "ollama pull qwen3.6:35b", "host": "ollama", "ref": "ollama:qwen3.6:35b", "tasks": ["coding", "agent", "chat", "vision"]},
+        {"name": "laguna-xs-2.1", "shape": "MoE 33B-A3B", "why": "publisher describes it as built for agentic coding on a local machine; KV on every layer, so check the fit table", "pull": "ollama pull laguna-xs-2.1", "host": "ollama", "ref": "ollama:laguna-xs-2.1:latest", "tasks": ["coding", "agent"]},
+        {"name": "nemotron-3.5-lightning", "shape": "MoE 30B-A3B", "why": "NVIDIA's always-on-agent model; alternative A3B", "pull": "ollama pull nemotron-3.5-lightning", "host": "ollama", "ref": "ollama:nemotron-3.5-lightning:latest", "tasks": ["agent", "chat"]},
+        {"name": "unsloth/Qwen3.8-27B-GGUF (UD-Q4_K_XL)", "shape": "dense 27B", "why": "the same quality baseline as an Unsloth dynamic quant for LM Studio / llama.cpp", "pull": "LM Studio: search unsloth/Qwen3.8-27B-GGUF, choose UD-Q4_K_XL", "host": "hf", "ref": "hf:unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL", "tasks": ["coding", "agent", "chat", "vision"]}
       ]
     },
     {
       "name": "48-64 GB",
       "max_gb": 64,
       "models": [
-        {"name": "qwen3.8:27b", "shape": "dense 27B", "why": "same quality baseline with room for 128k context", "pull": "ollama pull qwen3.8:27b", "host": "ollama", "ref": "ollama:qwen3.8:27b"},
-        {"name": "gemma4:31b", "shape": "dense 31B", "why": "second dense opinion from a different family", "pull": "ollama pull gemma4:31b", "host": "ollama", "ref": "ollama:gemma4:31b"},
-        {"name": "qwen3.6:35b", "shape": "MoE 35B-A3B", "why": "speed baseline", "pull": "ollama pull qwen3.6:35b", "host": "ollama", "ref": "ollama:qwen3.6:35b"}
+        {"name": "qwen3.8:27b", "shape": "dense 27B", "why": "same quality baseline with room for 128k context", "pull": "ollama pull qwen3.8:27b", "host": "ollama", "ref": "ollama:qwen3.8:27b", "tasks": ["coding", "agent", "chat", "vision"]},
+        {"name": "gemma4:31b", "shape": "dense 31B", "why": "second dense opinion from a different family; vision + audio", "pull": "ollama pull gemma4:31b", "host": "ollama", "ref": "ollama:gemma4:31b", "tasks": ["coding", "chat", "vision"]},
+        {"name": "qwen3.6:35b", "shape": "MoE 35B-A3B", "why": "speed baseline", "pull": "ollama pull qwen3.6:35b", "host": "ollama", "ref": "ollama:qwen3.6:35b", "tasks": ["coding", "agent", "chat", "vision"]}
       ]
     },
     {
       "name": "96-128 GB",
       "max_gb": 128,
       "models": [
-        {"name": "qwen3.8-flash-next", "shape": "MoE 125B-A6B", "why": "next-architecture preview; ~70 GB at Q4", "pull": "ollama pull qwen3.8-flash-next", "host": "ollama", "ref": "ollama:qwen3.8-flash-next:latest"},
-        {"name": "laguna-s-2.1", "shape": "MoE 118B-A8B", "why": "publisher's long-horizon coding model", "pull": "ollama pull laguna-s-2.1", "host": "ollama", "ref": "ollama:laguna-s-2.1:latest"},
-        {"name": "nemotron-3-super", "shape": "MoE 120B-A12B", "why": "multi-agent workloads", "pull": "ollama pull nemotron-3-super", "host": "ollama", "ref": "ollama:nemotron-3-super:latest"}
+        {"name": "qwen3.8-flash-next", "shape": "MoE 125B-A6B", "why": "next-architecture preview; ~70 GB at Q4", "pull": "ollama pull qwen3.8-flash-next", "host": "ollama", "ref": "ollama:qwen3.8-flash-next:latest", "tasks": ["coding", "agent", "chat", "vision"]},
+        {"name": "laguna-s-2.1", "shape": "MoE 118B-A8B", "why": "publisher's long-horizon coding model", "pull": "ollama pull laguna-s-2.1", "host": "ollama", "ref": "ollama:laguna-s-2.1:latest", "tasks": ["coding", "agent"]},
+        {"name": "nemotron-3-super", "shape": "MoE 120B-A12B", "why": "multi-agent workloads", "pull": "ollama pull nemotron-3-super", "host": "ollama", "ref": "ollama:nemotron-3-super:latest", "tasks": ["agent", "chat"]}
       ]
     }
   ]

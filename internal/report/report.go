@@ -38,6 +38,7 @@ type ModelResult struct {
 	MoE            bool        `json:"moe"`
 	Baseline       bool        `json:"baseline"`
 	BaselineNote   string      `json:"baseline_note"`
+	Tasks          []string    `json:"tasks,omitempty"`
 	Remote         bool        `json:"remote"` // header read from a registry; weights not on disk
 	Rows           []fit.Row   `json:"rows"`
 	MaxContext     uint64      `json:"max_context"`
@@ -93,7 +94,7 @@ func Build(m *model.Model, aliases []string, extras []string, budgetGB float64, 
 		ActiveParams:   Value{float64(m.ActiveParams()), model.Inferred},
 		WeightsGB:      Value{float64(m.WeightsBytes) / fit.GiB, model.Measured},
 		AttentionLayer: m.AttentionLayers(), Layers: m.Layers, MoE: m.IsMoE(),
-		Baseline: m.Baseline, BaselineNote: m.BaselineNote, Remote: m.Remote, Warnings: m.Warnings, Extras: extras,
+		Baseline: m.Baseline, BaselineNote: m.BaselineNote, Tasks: m.Tasks, Remote: m.Remote, Warnings: m.Warnings, Extras: extras,
 	}
 	per, err := fit.KVBytesPerToken(m, opts.KV)
 	if err != nil {
@@ -167,6 +168,9 @@ func WriteText(w io.Writer, r Report) {
 		fmt.Fprintf(w, "  %s %s %s, %.1f GB weights (%s), %.1fB params (%s), %d/%d layers hold KV\n",
 			m.Arch, shape, m.Quant, m.WeightsGB.Value, m.WeightsGB.Source, m.Params.Value/1e9, m.Params.Source, m.AttentionLayer, m.Layers)
 		fmt.Fprintf(w, "  %s\n", m.BaselineNote)
+		if len(m.Tasks) > 0 {
+			fmt.Fprintf(w, "  for: %s (from the file's own metadata)\n", strings.Join(m.Tasks, ", "))
+		}
 		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "  context\tKV GB\ttotal GB\tfits")
 		for _, row := range m.Rows {

@@ -41,8 +41,38 @@ func TestForMemoryPicksClass(t *testing.T) {
 	}
 }
 
+func TestFilterByTask(t *testing.T) {
+	l, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := l.ForMemory(32)
+	coding, ok, why := c.Filter("coding")
+	if !ok || why != "" || len(coding.Models) == 0 || len(coding.Models) >= len(c.Models) {
+		t.Errorf("coding filter: ok=%v why=%q kept %d of %d", ok, why, len(coding.Models), len(c.Models))
+	}
+	for _, e := range coding.Models {
+		found := false
+		for _, t := range e.Tasks {
+			found = found || t == "coding"
+		}
+		if !found {
+			t.Errorf("%s kept without the coding task", e.Name)
+		}
+	}
+	if all, ok, _ := c.Filter(""); !ok || len(all.Models) != len(c.Models) {
+		t.Error("empty task should keep everything")
+	}
+	if _, ok, why := c.Filter("TTS"); ok || !strings.Contains(why, "text-to-speech") {
+		t.Errorf("tts: ok=%v why=%q", ok, why)
+	}
+	if _, ok, why := c.Filter("juggling"); ok || !strings.Contains(why, "known tasks: agent, chat, coding, vision") {
+		t.Errorf("unknown: ok=%v why=%q", ok, why)
+	}
+}
+
 func TestValidateRejectsBadLists(t *testing.T) {
-	ok := Entry{Name: "x", Shape: "s", Why: "w", Pull: "p", Host: "ollama", Ref: "ollama:x"}
+	ok := Entry{Name: "x", Shape: "s", Why: "w", Pull: "p", Host: "ollama", Ref: "ollama:x", Tasks: []string{"coding"}}
 	bad := []List{
 		{Updated: "yesterday"},
 		{Updated: "2026-01-01"},
@@ -51,6 +81,8 @@ func TestValidateRejectsBadLists(t *testing.T) {
 		{Updated: "2026-01-01", Classes: []Class{{Name: "a", MaxGB: 32}}},
 		{Updated: "2026-01-01", Classes: []Class{{Name: "a", MaxGB: 32, Models: []Entry{{Name: "x", Shape: "s", Why: "w", Pull: "p", Host: "s3", Ref: "s3:x"}}}}},
 		{Updated: "2026-01-01", Classes: []Class{{Name: "a", MaxGB: 32, Models: []Entry{{Name: "x", Shape: "s", Why: "w", Pull: "p", Host: "hf", Ref: "ollama:x"}}}}},
+		{Updated: "2026-01-01", Classes: []Class{{Name: "a", MaxGB: 32, Models: []Entry{{Name: "x", Shape: "s", Why: "w", Pull: "p", Host: "hf", Ref: "hf:x/y"}}}}},
+		{Updated: "2026-01-01", Classes: []Class{{Name: "a", MaxGB: 32, Models: []Entry{{Name: "x", Shape: "s", Why: "w", Pull: "p", Host: "hf", Ref: "hf:x/y", Tasks: []string{"juggling"}}}}}},
 	}
 	good := List{Updated: "2026-01-01", Classes: []Class{{Name: "a", MaxGB: 32, Models: []Entry{ok}}}}
 	if err := good.validate(); err != nil {

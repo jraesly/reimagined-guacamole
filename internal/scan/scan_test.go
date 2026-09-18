@@ -33,8 +33,11 @@ func TestHFLayoutFindsGGUFMLXAndExtras(t *testing.T) {
 	for _, f := range found {
 		byOwner[f.Owner] = f
 	}
-	if d := byOwner["DavidAU"]; len(d.Extras) != 1 || d.IsDir || d.Names[0] != "DavidAU/Qwen-GGUF" {
-		t.Errorf("DavidAU = %+v", d)
+	if d := byOwner["DavidAU"]; len(d.Extras) != 1 || d.IsDir || d.Names[0] != "DavidAU/Qwen-GGUF" || !d.Vision {
+		t.Errorf("DavidAU = %+v (mmproj should mark vision)", d)
+	}
+	if u := byOwner["unsloth"]; u.Vision {
+		t.Error("no mmproj should not mark vision")
 	}
 	if m := byOwner["mlx-community"]; !m.IsDir {
 		t.Errorf("mlx = %+v", m)
@@ -54,7 +57,7 @@ func TestOllamaResolvesTagsToBlobs(t *testing.T) {
 	root := t.TempDir()
 	blob := filepath.Join(root, "blobs", "sha256-abc")
 	touch(t, blob, "weights")
-	manifest := `{"layers":[{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:abc"},{"mediaType":"application/vnd.ollama.image.params","digest":"sha256:zzz"}]}`
+	manifest := `{"layers":[{"mediaType":"application/vnd.ollama.image.projector","digest":"sha256:proj"},{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:abc"},{"mediaType":"application/vnd.ollama.image.params","digest":"sha256:zzz"}]}`
 	touch(t, filepath.Join(root, "manifests", "registry.ollama.ai", "library", "qwen3.8", "27b"), manifest)
 	touch(t, filepath.Join(root, "manifests", "registry.ollama.ai", "library", "qwen3.8", "27b-32k"), manifest)
 	touch(t, filepath.Join(root, "manifests", "registry.ollama.ai", "library", "gone", "latest"),
@@ -67,8 +70,8 @@ func TestOllamaResolvesTagsToBlobs(t *testing.T) {
 		t.Fatalf("found = %+v", found)
 	}
 	for _, f := range found {
-		if f.Path != blob || f.Owner != "library" || f.Source != "ollama" {
-			t.Errorf("entry = %+v", f)
+		if f.Path != blob || f.Owner != "library" || f.Source != "ollama" || !f.Vision {
+			t.Errorf("entry = %+v (projector layer should mark vision)", f)
 		}
 	}
 }

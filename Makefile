@@ -1,10 +1,15 @@
 GO ?= go
 BIN := bin/probe
+PREFIX ?= $(shell [ -d /opt/homebrew/bin ] && echo /opt/homebrew || echo /usr/local)
 
-.PHONY: build test vet fmt check run clean
+.PHONY: build install test vet fmt check run clean
 
 build:
 	$(GO) build -o $(BIN) ./cmd/probe
+
+install: build
+	install -m 755 $(BIN) $(PREFIX)/bin/probe
+	@echo "installed $(PREFIX)/bin/probe"
 
 test:
 	$(GO) test ./...

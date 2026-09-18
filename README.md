@@ -14,11 +14,13 @@ go install github.com/jraesly/reimagined-guacamole/cmd/probe@latest
 or build from a checkout:
 
 ```
-make build   # bin/probe
-make check   # gofmt, vet, tests
+make install   # builds and installs `probe` into /opt/homebrew/bin or /usr/local/bin
+make check     # gofmt, vet, tests
 ```
 
-Requires Go 1.22+.
+Requires Go 1.22+. Running `probe` with no arguments on a terminal opens an
+interactive menu (what fits, find a model for a task, measure, capture); every
+choice maps onto one of the commands below.
 
 ## Quick start: `fit`
 
@@ -69,6 +71,8 @@ Other useful invocations:
 ```
 probe fit --suggest                # short, dated list of baseline models for this memory class
 probe fit --suggest --online       # ...and fit each suggestion from its registry header
+probe fit --for vision             # only installed models tagged for a task, from their own metadata
+probe fit --suggest --for coding   # same for the curated list: coding, agent, chat, vision (tts/image/video are refused with a reason)
 probe fit ollama:laguna-xs-2.1     # a model you haven't pulled: header only, nothing downloaded
 probe fit --measure                # run installed Ollama models briefly to calibrate estimates
 probe fit --json ...               # every number carries a source label

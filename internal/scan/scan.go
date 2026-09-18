@@ -17,6 +17,7 @@ type Found struct {
 	Source string   // "lmstudio", "ollama", "hfcache"
 	IsDir  bool     // MLX / safetensors directory
 	Extras []string // companion files that are not weights, e.g. mmproj
+	Vision bool     // a vision projector accompanies the weights
 }
 
 // Roots lists the directories scanned, resolved against home.
@@ -39,6 +40,7 @@ func All(home string) ([]Found, error) {
 			if cur.Owner == "" {
 				cur.Owner = f.Owner
 			}
+			cur.Vision = cur.Vision || f.Vision
 			return
 		}
 		c := f
@@ -118,7 +120,7 @@ func inRepoDir(dir, owner, repo, source string) []Found {
 	}
 	var out []Found
 	for _, g := range firstShards(ggufs) {
-		out = append(out, Found{Path: g, Names: []string{owner + "/" + repo}, Owner: owner, Source: source, Extras: extras})
+		out = append(out, Found{Path: g, Names: []string{owner + "/" + repo}, Owner: owner, Source: source, Extras: extras, Vision: len(extras) > 0})
 	}
 	if hasConfig && hasSafetensors {
 		out = append(out, Found{Path: dir, Names: []string{owner + "/" + repo}, Owner: owner, Source: source, IsDir: true})
@@ -202,6 +204,12 @@ func Ollama(root string) ([]Found, error) {
 		if json.Unmarshal(raw, &m) != nil {
 			return nil
 		}
+		vision := false
+		for _, l := range m.Layers {
+			if l.MediaType == "application/vnd.ollama.image.projector" {
+				vision = true
+			}
+		}
 		for _, l := range m.Layers {
 			if l.MediaType != "application/vnd.ollama.image.model" {
 				continue
@@ -210,7 +218,7 @@ func Ollama(root string) ([]Found, error) {
 			if _, err := os.Stat(blob); err != nil {
 				continue
 			}
-			out = append(out, Found{Path: blob, Names: []string{parts[2] + ":" + parts[3]}, Owner: parts[1], Source: "ollama"})
+			out = append(out, Found{Path: blob, Names: []string{parts[2] + ":" + parts[3]}, Owner: parts[1], Source: "ollama", Vision: vision})
 		}
 		return nil
 	})

@@ -224,6 +224,62 @@ func resolveHF(ctx context.Context, r Ref) (*model.Model, error) {
 	return nil, fmt.Errorf("hf:%s: no .gguf files and no config.json + safetensors", repo)
 }
 
+// ResolveAll fits every GGUF quant in a Hugging Face repo: one Model per
+// shard group, sorted by size. A file filter on the ref narrows the set.
+// Files whose header cannot be read are reported in errs and skipped.
+func ResolveAll(ctx context.Context, r Ref) (models []*model.Model, errs []error, err error) {
+	if r.Host != "hf" {
+		return nil, nil, fmt.Errorf("--all-quants needs an hf:<owner>/<repo> target, got %s", r)
+	}
+	repo := r.Owner + "/" + r.Name
+	body, err := get(ctx, fmt.Sprintf("%s/api/models/%s/tree/main", HFBase, repo), 4<<20)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hf:%s: %w", repo, err)
+	}
+	var entries []hfEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, nil, fmt.Errorf("hf:%s: file listing: %w", repo, err)
+	}
+	var ggufs []hfEntry
+	for _, e := range entries {
+		if e.Type == "file" && strings.HasSuffix(e.Path, ".gguf") && !strings.Contains(e.Path, "mmproj") &&
+			(r.Tag == "" || strings.Contains(strings.ToLower(e.Path), strings.ToLower(r.Tag))) {
+			ggufs = append(ggufs, e)
+		}
+	}
+	if len(ggufs) == 0 {
+		return nil, nil, fmt.Errorf("hf:%s: no .gguf files%s", repo, filterNote(r.Tag))
+	}
+	seen := map[string]bool{}
+	for _, e := range ggufs {
+		first, total, partial := shardGroup(e, ggufs)
+		if seen[first.Path] {
+			continue
+		}
+		seen[first.Path] = true
+		h, ferr := FetchHeader(ctx, fmt.Sprintf("%s/%s/resolve/main/%s", HFBase, repo, first.Path))
+		if ferr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", first.Path, ferr))
+			continue
+		}
+		m, merr := model.FromHeader(h, "hf:"+repo+":"+first.Path, first.Path, total, r.Owner, partial)
+		if merr != nil {
+			errs = append(errs, merr)
+			continue
+		}
+		models = append(models, m)
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].WeightsBytes < models[j].WeightsBytes })
+	return models, errs, nil
+}
+
+func filterNote(filter string) string {
+	if filter == "" {
+		return ""
+	}
+	return fmt.Sprintf(" matching %q", filter)
+}
+
 // preferredQuants is the order tried when the user gives no file filter.
 var preferredQuants = []string{"Q4_K_M", "Q4_K_XL", "Q4_K_S", "IQ4_XS", "Q4_0", "Q5_K_M", "Q8_0"}
 

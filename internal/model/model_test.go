@@ -375,6 +375,41 @@ func TestPartialHeaderNeverFeedsExpertFraction(t *testing.T) {
 	}
 }
 
+func TestTasksFromHeader(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "m.gguf")
+	f := dense()
+	writeFixture(t, p, f, 0)
+	m, _ := FromGGUF(p)
+	if len(m.Tasks) != 1 || m.Tasks[0] != "chat" {
+		t.Errorf("plain LM tasks = %v, want [chat]", m.Tasks)
+	}
+	f.Metadata["tokenizer.chat_template"] = "{% if tools %}{{ tools | tojson }}{% endif %}"
+	writeFixture(t, p, f, 0)
+	m, _ = FromGGUF(p)
+	if !m.HasTask("agent") || !m.HasTask("coding") || !m.HasTask("chat") {
+		t.Errorf("tool template tasks = %v", m.Tasks)
+	}
+	m.AddTask("vision")
+	m.AddTask("vision")
+	if n := len(m.Tasks); n != 4 {
+		t.Errorf("AddTask should be idempotent, tasks = %v", m.Tasks)
+	}
+	e := dense()
+	e.Metadata["general.architecture"] = "nomic-bert"
+	for k, v := range map[string]any{"nomic-bert.block_count": uint32(12), "nomic-bert.attention.head_count": uint32(12),
+		"nomic-bert.attention.head_count_kv": uint32(12), "nomic-bert.attention.key_length": uint32(64)} {
+		e.Metadata[k] = v
+	}
+	writeFixture(t, p, e, 0)
+	m, err := FromGGUF(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Tasks) != 1 || m.Tasks[0] != "embedding" {
+		t.Errorf("embedding tasks = %v", m.Tasks)
+	}
+}
+
 func TestDenseReadBytesAndUnknownType(t *testing.T) {
 	f := dense()
 	f.Tensors = []gguf.TensorInfo{

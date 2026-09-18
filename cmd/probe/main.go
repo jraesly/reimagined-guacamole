@@ -30,6 +30,13 @@ var version = "0.1.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
+		if isTerminal(os.Stdin) {
+			if err := runInteractive(os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "probe:", err)
+				os.Exit(1)
+			}
+			return
+		}
 		usage()
 		os.Exit(2)
 	}
@@ -57,6 +64,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
+  probe                                            interactive menu (on a terminal)
   probe fit [flags] [target ...]                   fit models to this machine
   probe capture --upstream URL [flags]             proxy a harness and measure what it sends
   probe header model.gguf                          dump GGUF header metadata (arrays summarized)
@@ -77,6 +85,7 @@ func runFit(args []string) error {
 	asJSON := fs.Bool("json", false, "emit JSON with source labels")
 	doSuggest := fs.Bool("suggest", false, "append curated baseline models for this memory class")
 	online := fs.Bool("online", false, "with --suggest, read each suggested model's header from its registry and fit it")
+	forTask := fs.String("for", "", "keep only models for this task (coding, agent, chat, vision, embedding); also filters --suggest")
 	doMeasure := fs.Bool("measure", false, "run each installed Ollama model briefly and record its measured decode speed for calibration")
 	measureCtx := fs.Int("measure-ctx", 4096, "context size used for --measure runs")
 	measureTokens := fs.Int("measure-tokens", 128, "tokens generated per --measure run")
@@ -245,6 +254,12 @@ func runFit(args []string) error {
 			if len(t.Names) > 0 {
 				m.Name = t.Names[0]
 			}
+			if t.Vision {
+				m.AddTask("vision")
+			}
+			if task := strings.ToLower(strings.TrimSpace(*forTask)); task != "" && !m.HasTask(task) {
+				continue // not for this task; leave it out of the report
+			}
 		}
 		locals = append(locals, loaded{t, m, merr})
 	}
@@ -275,6 +290,9 @@ func runFit(args []string) error {
 		}
 	}
 	if len(rep.Models) == 0 && !*doSuggest {
+		if *forTask != "" {
+			return fmt.Errorf("no installed models for %q; try --suggest --for %s", *forTask, *forTask)
+		}
 		return errors.New("no models found; pass a .gguf path or an MLX directory, or use --suggest")
 	}
 
@@ -291,6 +309,14 @@ func runFit(args []string) error {
 			mem = info.VRAMGB
 		}
 		if c, ok := list.ForMemory(mem); ok {
+			filtered, ok, why := c.Filter(*forTask)
+			if !ok {
+				return fmt.Errorf("--for %s: %s", *forTask, why)
+			}
+			c = filtered
+			if *forTask != "" {
+				c.Name += " for " + strings.ToLower(*forTask)
+			}
 			home, _ := os.UserHomeDir()
 			hosts := detectHosts(home)
 			c.Models = filterHosts(c.Models, hosts)

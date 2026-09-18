@@ -52,10 +52,15 @@ type Model struct {
 	ReadBytesSource Source
 	ContextLength   uint64 // training/maximum context from the header, 0 if absent
 	CacheModel      string // "" for ordinary K/V; "mla" or "swa" when the KV figure is only an upper bound
-	Owner           string
-	Baseline        bool
-	BaselineNote    string
-	Warnings        []string
+	// Tasks the file's own metadata supports: "chat" for any causal LM,
+	// "agent" and "coding" when the chat template knows about tools,
+	// "vision" when a projector accompanies it (set by the caller),
+	// "embedding" for encoder architectures.
+	Tasks        []string
+	Owner        string
+	Baseline     bool
+	BaselineNote string
+	Warnings     []string
 }
 
 // IsMoE reports whether the model routes tokens to a subset of experts.
@@ -332,7 +337,43 @@ func (m *Model) fill(headers []*gguf.Header, fallbackName string, partial bool) 
 	if e, ok := h.Uint(a + ".expert_used_count"); ok {
 		m.ExpertsUsed = uint32(e)
 	}
+	m.Tasks = tasksFromHeader(h)
 	return nil
+}
+
+// embeddingArchs are encoder families that produce vectors, not text.
+var embeddingArchs = map[string]bool{"bert": true, "nomic-bert": true, "nomic-bert-moe": true, "jina-bert-v2": true, "xlm-roberta": true, "gte": true}
+
+func tasksFromHeader(h *gguf.Header) []string {
+	if embeddingArchs[h.Arch()] {
+		return []string{"embedding"}
+	}
+	tasks := []string{"chat"}
+	tmpl, _ := h.String("tokenizer.chat_template")
+	if strings.Contains(tmpl, "tool") {
+		tasks = append(tasks, "agent", "coding")
+	}
+	return tasks
+}
+
+// AddTask appends a task once.
+func (m *Model) AddTask(t string) {
+	for _, have := range m.Tasks {
+		if have == t {
+			return
+		}
+	}
+	m.Tasks = append(m.Tasks, t)
+}
+
+// HasTask reports whether the model lists task.
+func (m *Model) HasTask(task string) bool {
+	for _, t := range m.Tasks {
+		if t == task {
+			return true
+		}
+	}
+	return false
 }
 
 // MLXConfig is the subset of a Hugging Face / MLX config.json fit needs.

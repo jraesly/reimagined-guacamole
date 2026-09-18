@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -18,12 +19,62 @@ const MaxAge = 90 * 24 * time.Hour
 
 // Entry is one recommended model.
 type Entry struct {
-	Name  string `json:"name"`
-	Shape string `json:"shape"`
-	Why   string `json:"why"`
-	Pull  string `json:"pull"`
-	Host  string `json:"host"` // "ollama" or "hf"
-	Ref   string `json:"ref"`  // remote reference fit can resolve, e.g. ollama:qwen3.8:27b
+	Name  string   `json:"name"`
+	Shape string   `json:"shape"`
+	Why   string   `json:"why"`
+	Pull  string   `json:"pull"`
+	Host  string   `json:"host"`  // "ollama" or "hf"
+	Ref   string   `json:"ref"`   // remote reference fit can resolve, e.g. ollama:qwen3.8:27b
+	Tasks []string `json:"tasks"` // what the model is for; see Tasks
+}
+
+// Tasks probe can reason about: all are transformer LLM/VLM weights that
+// Ollama, LM Studio or llama.cpp serve, so the fit arithmetic applies.
+var Tasks = map[string]string{
+	"coding": "writing and editing code through a coding agent",
+	"agent":  "long tool-calling sessions; needs reliable tool use",
+	"chat":   "general assistant use",
+	"vision": "understanding images or screenshots alongside text",
+}
+
+// Unsupported explains tasks whose models are not LLM weights in a GGUF/MLX
+// header, so neither the fit math nor the hosts probe knows apply.
+var Unsupported = map[string]string{
+	"tts":    "text-to-speech models (Kokoro, XTTS, MLX-audio) run in their own runtimes; their memory needs are not in a GGUF header",
+	"speech": "speech-to-text (whisper.cpp, MLX Whisper) runs outside Ollama/LM Studio; not modeled",
+	"image":  "image generation (Stable Diffusion, Flux via ComfyUI/Draw Things) is a diffusion pipeline, not an LLM; not modeled",
+	"video":  "video generation is a diffusion pipeline with very different memory behavior; not modeled",
+	"music":  "music generation models are not served by Ollama/LM Studio; not modeled",
+}
+
+// Filter keeps entries that list task. It returns ok=false with a reason
+// when the task is unknown or one probe cannot model.
+func (c Class) Filter(task string) (Class, bool, string) {
+	task = strings.ToLower(strings.TrimSpace(task))
+	if task == "" {
+		return c, true, ""
+	}
+	if why, bad := Unsupported[task]; bad {
+		return Class{}, false, why
+	}
+	if _, known := Tasks[task]; !known {
+		names := make([]string, 0, len(Tasks))
+		for t := range Tasks {
+			names = append(names, t)
+		}
+		sort.Strings(names)
+		return Class{}, false, fmt.Sprintf("unknown task %q; known tasks: %s", task, strings.Join(names, ", "))
+	}
+	out := Class{Name: c.Name, MaxGB: c.MaxGB}
+	for _, e := range c.Models {
+		for _, t := range e.Tasks {
+			if t == task {
+				out.Models = append(out.Models, e)
+				break
+			}
+		}
+	}
+	return out, true, ""
 }
 
 // Class groups entries by the memory they need.
@@ -77,6 +128,14 @@ func (l *List) validate() error {
 			}
 			if !strings.HasPrefix(m.Ref, m.Host+":") {
 				return fmt.Errorf("class %q: entry %q ref %q does not match host %q", c.Name, m.Name, m.Ref, m.Host)
+			}
+			if len(m.Tasks) == 0 {
+				return fmt.Errorf("class %q: entry %q lists no tasks", c.Name, m.Name)
+			}
+			for _, t := range m.Tasks {
+				if _, ok := Tasks[t]; !ok {
+					return fmt.Errorf("class %q: entry %q has unknown task %q", c.Name, m.Name, t)
+				}
 			}
 		}
 	}
