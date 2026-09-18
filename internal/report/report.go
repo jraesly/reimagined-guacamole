@@ -212,6 +212,46 @@ func WriteText(w io.Writer, r Report) {
 	}
 }
 
+// WriteQuantTable renders one row per quant of the same model, so the
+// choice between Q4_K_M, UD-Q4_K_XL, Q5, Q6 and Q8 is visible at a glance.
+func WriteQuantTable(w io.Writer, r Report, title string) {
+	fmt.Fprintf(w, "Machine   %s, %.0f GB, budget %.1f GB for weights + KV\n", r.Hardware.Chip, r.Hardware.RAMGB, r.Budget.GB)
+	fmt.Fprintf(w, "%s — one row per quant (weights measured from the registry; fits inferred)\n\n", title)
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	var ctxs []uint64
+	for _, m := range r.Models {
+		if len(m.Rows) > 0 {
+			for _, row := range m.Rows {
+				ctxs = append(ctxs, row.Context)
+			}
+			break
+		}
+	}
+	fmt.Fprint(tw, "file\tquant\tGB")
+	for _, c := range ctxs {
+		fmt.Fprintf(tw, "\t%s", ctxLabel(c))
+	}
+	fmt.Fprintln(tw, "\test tok/s")
+	for _, m := range r.Models {
+		if m.Error != "" {
+			fmt.Fprintf(tw, "%s\t-\t-\terror: %s\n", m.Name, m.Error)
+			continue
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%.1f", m.Name, m.Quant, m.WeightsGB.Value)
+		for _, row := range m.Rows {
+			fmt.Fprintf(tw, "\t%s", row.Verdict)
+		}
+		if m.DecodeTokS != nil {
+			fmt.Fprintf(tw, "\t~%.0f", m.DecodeTokS.Value)
+		} else {
+			fmt.Fprint(tw, "\t-")
+		}
+		fmt.Fprintln(tw)
+	}
+	tw.Flush()
+	fmt.Fprintln(w, "\n"+fit.TightNote)
+}
+
 func ctxLabel(n uint64) string {
 	if n%1024 == 0 {
 		return fmt.Sprintf("%dk", n/1024)

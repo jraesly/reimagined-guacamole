@@ -17,6 +17,10 @@ type Host struct {
 func DetectHosts(home string) []Host {
 	var out []Host
 	add := func(name, path string, kinds ...string) { out = append(out, Host{name, path, kinds}) }
+	// ComfyUI is looked for at most three levels below home (~/ComfyUI,
+	// ~/src/ComfyUI, ~/src/ai/ComfyUI); a full home walk would take
+	// seconds on a developer machine.
+	const maxDepth = 3
 	_ = filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -29,6 +33,9 @@ func DetectHosts(home string) []Host {
 			return filepath.SkipDir
 		}
 		if path != home && (strings.HasPrefix(d.Name(), ".") || d.Name() == "Library" || d.Name() == "node_modules") {
+			return filepath.SkipDir
+		}
+		if rel, err := filepath.Rel(home, path); err == nil && rel != "." && strings.Count(rel, string(filepath.Separator)) >= maxDepth-1 {
 			return filepath.SkipDir
 		}
 		return nil
@@ -65,6 +72,9 @@ func DetectHosts(home string) []Host {
 			}
 			if d.Name() == "blobs" {
 				return filepath.SkipDir
+			}
+			if path == root && isDir(filepath.Join(root, "snapshots")) {
+				return nil
 			}
 			if kind, ok := Detect(path); ok {
 				if _, err := os.Stat(filepath.Join(path, "model_index.json")); err == nil {

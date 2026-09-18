@@ -37,14 +37,16 @@ var Tasks = map[string]string{
 	"vision": "understanding images or screenshots alongside text",
 }
 
-// Unsupported explains tasks whose models are not LLM weights in a GGUF/MLX
-// header, so neither the fit math nor the hosts probe knows apply.
+// Unsupported explains tasks that have no curated suggestion list. Image,
+// video, TTS and speech models on this machine are still reported by
+// `probe fit --for <task>` (weights measured from safetensors/GGUF headers,
+// activations not modeled); there is just no baseline list to recommend from.
 var Unsupported = map[string]string{
-	"tts":    "text-to-speech models (Kokoro, XTTS, MLX-audio) run in their own runtimes; their memory needs are not in a GGUF header",
-	"speech": "speech-to-text (whisper.cpp, MLX Whisper) runs outside Ollama/LM Studio; not modeled",
-	"image":  "image generation (Stable Diffusion, Flux via ComfyUI/Draw Things) is a diffusion pipeline, not an LLM; not modeled",
-	"video":  "video generation is a diffusion pipeline with very different memory behavior; not modeled",
-	"music":  "music generation models are not served by Ollama/LM Studio; not modeled",
+	"tts":    "no curated text-to-speech list; `probe fit --for tts` reports the Kokoro/XTTS/MLX-audio models on this machine",
+	"speech": "no curated speech-to-text list; `probe fit --for speech` reports whisper.cpp / MLX Whisper models on this machine",
+	"image":  "no curated image-generation list; `probe fit --for image` reports the Stable Diffusion/Flux models on this machine (ComfyUI, Draw Things, HF cache)",
+	"video":  "no curated video-generation list; `probe fit --for video` reports Wan/HunyuanVideo/LTX models on this machine",
+	"music":  "music generation models are not served by any runtime probe knows; not modeled",
 }
 
 // Filter keeps entries that list task. It returns ok=false with a reason

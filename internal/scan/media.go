@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/jraesly/reimagined-guacamole/internal/media"
 )
@@ -22,6 +23,13 @@ func Media(home string) []MediaFound {
 			}
 			if d.IsDir() && d.Name() == "blobs" {
 				return filepath.SkipDir
+			}
+			// A cache repository is a container; named XTTS repositories must
+			// resolve to their snapshot rather than trigger the name heuristic.
+			if d.IsDir() && strings.HasPrefix(d.Name(), "models--") {
+				if st, err := os.Stat(filepath.Join(path, "snapshots")); err == nil && st.IsDir() {
+					return nil
+				}
 			}
 			if kind, ok := media.Detect(path); ok {
 				byPath[path] = MediaFound{Path: path, Name: filepath.Base(path), Kind: string(kind), Source: source}

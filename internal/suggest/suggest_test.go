@@ -63,7 +63,7 @@ func TestFilterByTask(t *testing.T) {
 	if all, ok, _ := c.Filter(""); !ok || len(all.Models) != len(c.Models) {
 		t.Error("empty task should keep everything")
 	}
-	if _, ok, why := c.Filter("TTS"); ok || !strings.Contains(why, "text-to-speech") {
+	if _, ok, why := c.Filter("TTS"); ok || !strings.Contains(why, "probe fit --for tts") {
 		t.Errorf("tts: ok=%v why=%q", ok, why)
 	}
 	if _, ok, why := c.Filter("juggling"); ok || !strings.Contains(why, "known tasks: agent, chat, coding, vision") {

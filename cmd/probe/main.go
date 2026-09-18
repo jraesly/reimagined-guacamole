@@ -19,6 +19,7 @@ import (
 	"github.com/jraesly/reimagined-guacamole/internal/gguf"
 	"github.com/jraesly/reimagined-guacamole/internal/hw"
 	"github.com/jraesly/reimagined-guacamole/internal/measure"
+	"github.com/jraesly/reimagined-guacamole/internal/media"
 	"github.com/jraesly/reimagined-guacamole/internal/model"
 	"github.com/jraesly/reimagined-guacamole/internal/remote"
 	"github.com/jraesly/reimagined-guacamole/internal/report"
@@ -86,11 +87,14 @@ func runFit(args []string) error {
 	doSuggest := fs.Bool("suggest", false, "append curated baseline models for this memory class")
 	online := fs.Bool("online", false, "with --suggest, read each suggested model's header from its registry and fit it")
 	forTask := fs.String("for", "", "keep only models for this task (coding, agent, chat, vision, embedding); also filters --suggest")
+	allQuants := fs.Bool("all-quants", false, "for an hf:<owner>/<repo> target, fit every GGUF quant in the repo and print one row per quant")
+	activationGB := fs.Float64("activation-gb", 0, "with --for image|video|tts|speech: activation memory to add to the weights, from your own runs")
 	doMeasure := fs.Bool("measure", false, "run each installed Ollama model briefly and record its measured decode speed for calibration")
 	measureCtx := fs.Int("measure-ctx", 4096, "context size used for --measure runs")
 	measureTokens := fs.Int("measure-tokens", 128, "tokens generated per --measure run")
 	calibPath := fs.String("calibration", "", "calibration file (default ~/.config/probe/calibration.json)")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterleaved(fs, args)
+	if err != nil {
 		return err
 	}
 	ctxs, err := parseContexts(*contexts)
@@ -115,6 +119,29 @@ func runFit(args []string) error {
 	}
 	budget := info.Budget(*reserve)
 	opts := fit.Options{Contexts: ctxs, KV: kvType}
+
+	// Image, video, TTS and speech models live in other runtimes and have
+	// no KV cache; they take the media path instead of the LLM path.
+	if task := strings.ToLower(strings.TrimSpace(*forTask)); mediaTasks[task] != "" {
+		if *doSuggest {
+			return fmt.Errorf("--suggest has no curated %s list yet; `probe fit --for %s` reports the %s models on this machine", task, task, task)
+		}
+		return runMediaFit(task, positional, info, budget, *activationGB, *asJSON, os.Stdout)
+	}
+	if len(positional) > 0 && !*allQuants {
+		mediaPaths := positional[:0:0]
+		for _, p := range positional {
+			if _, ok := remote.ParseRef(p); ok {
+				continue
+			}
+			if _, ok := media.Detect(p); ok {
+				mediaPaths = append(mediaPaths, p)
+			}
+		}
+		if len(mediaPaths) == len(positional) && len(mediaPaths) > 0 {
+			return runMediaFit("", positional, info, budget, *activationGB, *asJSON, os.Stdout)
+		}
+	}
 
 	if *calibPath == "" {
 		if *calibPath, err = calib.DefaultPath(); err != nil {
@@ -204,7 +231,7 @@ func runFit(args []string) error {
 
 	var local []string
 	var refs []remote.Ref
-	for _, a := range fs.Args() {
+	for _, a := range positional {
 		if r, ok := remote.ParseRef(a); ok {
 			refs = append(refs, r)
 		} else {
@@ -226,6 +253,26 @@ func runFit(args []string) error {
 			return
 		}
 		rep.Models = append(rep.Models, report.Build(m, nil, nil, budget.GB, opts, info.BandwidthGBs, cal))
+	}
+	if *allQuants {
+		if len(refs) != 1 || refs[0].Host != "hf" {
+			return errors.New("--all-quants takes exactly one hf:<owner>/<repo> target")
+		}
+		models, errs, err := remote.ResolveAll(ctx, refs[0])
+		if err != nil {
+			return err
+		}
+		for _, m := range models {
+			rep.Models = append(rep.Models, report.Build(m, nil, nil, budget.GB, opts, info.BandwidthGBs, cal))
+		}
+		for _, e := range errs {
+			rep.Models = append(rep.Models, report.ModelResult{Name: e.Error(), Error: e.Error()})
+		}
+		if *asJSON {
+			return report.WriteJSON(os.Stdout, rep)
+		}
+		report.WriteQuantTable(os.Stdout, rep, "hf:"+refs[0].Owner+"/"+refs[0].Name)
+		return nil
 	}
 	for _, r := range refs {
 		addRemote(r)
@@ -471,6 +518,24 @@ func aliases(f scan.Found) []string {
 		return f.Names[1:]
 	}
 	return nil
+}
+
+// parseInterleaved lets flags appear before or after positional arguments
+// (`probe fit hf:x/y --all-quants`), which the flag package does not do on
+// its own: it stops at the first positional.
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
 }
 
 // parseContexts accepts "32k", "32768", or comma-separated lists of either.

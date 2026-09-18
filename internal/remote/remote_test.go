@@ -209,6 +209,57 @@ func TestResolveHFGGUFShardedAndFilter(t *testing.T) {
 	}
 }
 
+func TestResolveAllQuants(t *testing.T) {
+	blob := append(header("qwen35", nil), make([]byte, 10)...)
+	var ranges []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/models/unsloth/Q/tree/main", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"type": "file", "path": "mmproj-F16.gguf", "size": 999},
+			{"type": "file", "path": "Q-UD-Q4_K_XL-00001-of-00002.gguf", "size": 1000},
+			{"type": "file", "path": "Q-UD-Q4_K_XL-00002-of-00002.gguf", "size": 2000},
+			{"type": "file", "path": "Q-Q8_0.gguf", "size": 5000},
+			{"type": "file", "path": "Q-Q2_K.gguf", "size": 500},
+			{"type": "file", "path": "Q-broken.gguf", "size": 7},
+		})
+	})
+	for _, p := range []string{"Q-UD-Q4_K_XL-00001-of-00002.gguf", "Q-Q8_0.gguf", "Q-Q2_K.gguf"} {
+		serveBlob(t, mux, "/unsloth/Q/resolve/main/"+p, blob, &ranges)
+	}
+	mux.HandleFunc("/unsloth/Q/resolve/main/Q-broken.gguf", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "x", time.Time{}, strings.NewReader("garbage"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	HFBase = srv.URL
+
+	models, errs, err := ResolveAll(context.Background(), Ref{Host: "hf", Owner: "unsloth", Name: "Q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 3 || len(errs) != 1 {
+		t.Fatalf("models=%d errs=%v", len(models), errs)
+	}
+	// sorted by size: Q2_K (500), the sharded XL (3000), Q8_0 (5000); mmproj skipped; broken reported.
+	if models[0].WeightsBytes != 500 || models[1].WeightsBytes != 3000 || models[2].WeightsBytes != 5000 {
+		t.Errorf("order = %d %d %d", models[0].WeightsBytes, models[1].WeightsBytes, models[2].WeightsBytes)
+	}
+	if !strings.Contains(errs[0].Error(), "Q-broken.gguf") {
+		t.Errorf("err = %v", errs[0])
+	}
+	if len(ranges) != 3 {
+		t.Errorf("shard 2 must not be fetched; %d header fetches", len(ranges))
+	}
+	// A filter narrows the set.
+	models, _, _ = ResolveAll(context.Background(), Ref{Host: "hf", Owner: "unsloth", Name: "Q", Tag: "q8"})
+	if len(models) != 1 || models[0].WeightsBytes != 5000 {
+		t.Errorf("filtered = %+v", models)
+	}
+	if _, _, err := ResolveAll(context.Background(), Ref{Host: "ollama", Name: "x", Owner: "library", Tag: "latest"}); err == nil {
+		t.Error("ollama refs should be rejected")
+	}
+}
+
 func TestResolveHFMLX(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/models/mlx-community/M/tree/main", func(w http.ResponseWriter, r *http.Request) {

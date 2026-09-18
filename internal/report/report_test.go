@@ -30,6 +30,26 @@ func sample() Report {
 	return Report{Hardware: info, Budget: budget, KV: fit.KVF16, Models: []ModelResult{res}}
 }
 
+func TestWriteQuantTable(t *testing.T) {
+	r := sample()
+	q8 := r.Models[0]
+	q8.Name, q8.Quant = "Q-Q8_0.gguf", "Q8_0"
+	broken := ModelResult{Name: "Q-broken.gguf", Error: "not a GGUF file"}
+	r.Models = []ModelResult{r.Models[0], q8, broken}
+	r.Models[0].Name, r.Models[0].Quant = "Q-Q4_K_M.gguf", "Q4_K_M"
+	var b bytes.Buffer
+	WriteQuantTable(&b, r, "unsloth/Q")
+	out := b.String()
+	for _, want := range []string{"file", "quant", "32k", "1024k", "est tok/s", "Q-Q4_K_M.gguf", "Q4_K_M", "Q-Q8_0.gguf", "yes", "no", "~11", "error: not a GGUF file", "tight = within 10%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("quant table missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "\n") > 12 {
+		t.Errorf("table should be compact, got %d lines:\n%s", strings.Count(out, "\n"), out)
+	}
+}
+
 func TestBuildUsesCalibration(t *testing.T) {
 	cf := &calib.File{Version: 1}
 	cf.Add(calib.Sample{Model: "qwen3.8:27b-32k", Kind: "dense", Backend: "ollama", TokPerSec: 11.35,

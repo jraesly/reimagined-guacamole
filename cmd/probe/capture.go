@@ -25,8 +25,10 @@ func runCapture(args []string) error {
 	reportPath := fs.String("report", "", "write the Markdown session report to this file on exit")
 	dump := fs.String("dump", "", "directory for redacted raw request/response bodies (off by default)")
 	maxBodyMiB := fs.Int64("max-body", 32, "largest request body accounted, in MiB; bigger ones are forwarded unaccounted")
-	if err := fs.Parse(args); err != nil {
+	if extra, err := parseInterleaved(fs, args); err != nil {
 		return err
+	} else if len(extra) > 0 {
+		return fmt.Errorf("capture takes no positional arguments, got %q", extra)
 	}
 	if *upstream == "" {
 		return errors.New("capture needs --upstream, e.g. --upstream http://localhost:1234/v1")

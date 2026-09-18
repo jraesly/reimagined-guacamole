@@ -75,3 +75,18 @@ func TestMediaHFLinks(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestMediaXTTSCacheSnapshot(t *testing.T) {
+	home := t.TempDir()
+	snap := filepath.Join(home, ".cache", "huggingface", "hub", "models--owner--xtts", "snapshots", "rev")
+	if err := os.MkdirAll(snap, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snap, "config.json"), []byte(`{"model":"xtts"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := Media(home)
+	if len(got) != 1 || got[0].Path != snap {
+		t.Fatalf("want snapshot, got %+v", got)
+	}
+}

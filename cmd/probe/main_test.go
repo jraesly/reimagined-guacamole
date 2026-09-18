@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,6 +30,24 @@ func TestDetectHostsAndFilter(t *testing.T) {
 	}
 	if got := filterHosts(entries, nil); len(got) != 2 {
 		t.Errorf("no hosts should keep all, got %v", got)
+	}
+}
+
+func TestParseInterleaved(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	all := fs.Bool("all-quants", false, "")
+	ctx := fs.String("context", "", "")
+	pos, err := parseInterleaved(fs, []string{"hf:a/b", "--all-quants", "x.gguf", "--context", "32k", "y.gguf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !*all || *ctx != "32k" || !reflect.DeepEqual(pos, []string{"hf:a/b", "x.gguf", "y.gguf"}) {
+		t.Errorf("all=%v ctx=%q pos=%v", *all, *ctx, pos)
+	}
+	fs2 := flag.NewFlagSet("t", flag.ContinueOnError)
+	fs2.SetOutput(io.Discard)
+	if _, err := parseInterleaved(fs2, []string{"a", "--nope"}); err == nil {
+		t.Error("unknown flag after a positional must still error")
 	}
 }
 

@@ -118,6 +118,23 @@ Header facts (fit_test.go:qwen38): 64 main layers with full attention every 4th
 - Total at 32k: `15.8 + 2 + 0.5 = 18.3 GiB` → yes on 24 GB. At 256k:
   `15.8 + 16 + 0.5 = 32.3 GiB` → no.
 
+## Image, video, TTS and speech models (`internal/media`)
+
+A safetensors file begins with a JSON header that lists every tensor's dtype,
+shape and byte range, and a diffusers repo's `model_index.json` lists the
+pipeline's components — so weight bytes per component are `measured` without
+reading the data, exactly as for GGUF. Families are recognised from the
+pipeline class (`StableDiffusionXLPipeline` → sdxl, `FluxPipeline` → flux,
+`WanPipeline` → wan, …), from single-file tensor names (`double_blocks.` →
+flux, `model.diffusion_model.input_blocks.` + `conditioner.embedders` → sdxl),
+from diffusion GGUF quants (`general.architecture: flux`), and for audio from
+`config.json` model types or the whisper.cpp ggml magic. What the header cannot
+give is the activation working set — it scales with resolution² for image
+models and resolution × frames for video — so the verdict is `weights-only`
+unless `--activation-gb` supplies a figure, which is then labeled `inferred`.
+No speed estimate exists for these: there is no bandwidth roofline for a
+diffusion step.
+
 ## Known limitations
 
 - The bandwidth table (hw.go) covers a fixed set of chips with single vendor

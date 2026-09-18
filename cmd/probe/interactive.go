@@ -25,6 +25,7 @@ var menu = []struct {
 	{"Find a model for a task", "probe fit --suggest --online --for <task>"},
 	{"Measure my installed models", "probe fit --measure"},
 	{"Watch what my coding harness sends", "probe capture --upstream <server>"},
+	{"Image / video / TTS / speech models here", "probe fit --for image|video|tts|speech"},
 	{"Quit", ""},
 }
 
@@ -79,10 +80,25 @@ func runInteractive(in io.Reader, out io.Writer) error {
 			report := fmt.Sprintf("probe-capture-%s.md", time.Now().Format("20060102-150405"))
 			fmt.Fprintf(out, "Starting the proxy; the Markdown report will be written to ./%s when you press Ctrl-C.\n", report)
 			return runCapture([]string{"--upstream", upstream, "--report", report})
-		case "5", "q", "quit", "exit", "":
+		case "5":
+			kind, err := ask(rd, out, "which kind? [image/video/tts/speech, Enter for all] ")
+			if err != nil {
+				return nil
+			}
+			args := []string{}
+			if kind = strings.ToLower(strings.TrimSpace(kind)); kind != "" {
+				args = append(args, "--for", kind)
+			} else {
+				args = append(args, "--for", "image")
+				fmt.Fprintln(out, "(showing image models; run probe fit --for video|tts|speech for the others)")
+			}
+			if err := runFit(args); err != nil {
+				fmt.Fprintln(out, "probe:", err)
+			}
+		case "6", "q", "quit", "exit", "":
 			return nil
 		default:
-			fmt.Fprintln(out, "pick 1-5")
+			fmt.Fprintln(out, "pick 1-6")
 		}
 	}
 }

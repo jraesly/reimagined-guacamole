@@ -11,10 +11,10 @@ import (
 
 func TestInteractiveQuitAndMenu(t *testing.T) {
 	var out bytes.Buffer
-	if err := runInteractive(strings.NewReader("5\n"), &out); err != nil {
+	if err := runInteractive(strings.NewReader("6\n"), &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"1) What fits on this machine", "probe fit --suggest --online --for <task>", "5) Quit"} {
+	for _, want := range []string{"1) What fits on this machine", "probe fit --suggest --online --for <task>", "5) Image / video / TTS / speech", "6) Quit"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("menu missing %q:\n%s", want, out.String())
 		}
@@ -25,7 +25,7 @@ func TestInteractiveQuitAndMenu(t *testing.T) {
 	}
 	out.Reset()
 	_ = runInteractive(strings.NewReader("9\nq\n"), &out)
-	if !strings.Contains(out.String(), "pick 1-5") {
+	if !strings.Contains(out.String(), "pick 1-6") {
 		t.Errorf("bad choice not reported:\n%s", out.String())
 	}
 }
@@ -37,7 +37,7 @@ func TestAskTask(t *testing.T) {
 		if err != nil || got != want {
 			t.Errorf("askTask(%q) = %q, %v; want %q", in, got, err, want)
 		}
-		if strings.TrimSpace(in) == "tts" && !strings.Contains(out.String(), "text-to-speech") {
+		if strings.TrimSpace(in) == "tts" && !strings.Contains(out.String(), "probe fit --for tts") {
 			t.Errorf("tts should explain why it is unsupported:\n%s", out.String())
 		}
 	}

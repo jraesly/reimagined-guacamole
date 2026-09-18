@@ -72,7 +72,24 @@ Other useful invocations:
 probe fit --suggest                # short, dated list of baseline models for this memory class
 probe fit --suggest --online       # ...and fit each suggestion from its registry header
 probe fit --for vision             # only installed models tagged for a task, from their own metadata
-probe fit --suggest --for coding   # same for the curated list: coding, agent, chat, vision (tts/image/video are refused with a reason)
+probe fit --suggest --for coding   # same for the curated list: coding, agent, chat, vision
+probe fit hf:unsloth/Qwen3.8-27B-GGUF --all-quants   # one row per quant in a repo: which Q4/Q5/Q6/Q8 fits at which context
+probe fit --for image              # image / video / tts / speech models on this machine (see below)
+```
+
+### Image, video, TTS and speech models
+
+These live in other runtimes (ComfyUI, Draw Things, MLX-audio, whisper.cpp)
+and have no KV cache, so the LLM math does not apply. `probe fit --for
+image|video|tts|speech` finds them (ComfyUI and Draw Things model folders,
+the Hugging Face cache, whisper.cpp model dirs, or an explicit path), reads
+weights and dtypes from the safetensors/diffusers/GGUF headers (measured), and
+reports a `weights-only` verdict: the weights fit, but activation memory
+scales with resolution and frames and is not in any file header. Pass
+`--activation-gb N` from your own runs to turn that into a full yes/tight/no.
+There is no curated suggestion list and no speed estimate for these yet.
+
+```
 probe fit ollama:laguna-xs-2.1     # a model you haven't pulled: header only, nothing downloaded
 probe fit --measure                # run installed Ollama models briefly to calibrate estimates
 probe fit --json ...               # every number carries a source label
