@@ -51,9 +51,12 @@ type Verdict string
 
 const (
 	Yes   Verdict = "yes"
-	Tight Verdict = "tight" // within 10% of the budget
+	Tight Verdict = "tight" // within 10% of the budget: runtime buffers are not modeled, so it may still spill
 	No    Verdict = "no"
 )
+
+// TightNote is printed wherever a tight verdict appears.
+const TightNote = "tight = within 10% of the budget; runtime buffers are not modeled, so it may still spill (validated once: an 11% CPU spill at a tight verdict)"
 
 // Row is one line of the fit table.
 type Row struct {
@@ -95,7 +98,10 @@ func Table(m *model.Model, budgetGB float64, opts Options) ([]Row, error) {
 		opts.Contexts = DefaultContexts
 	}
 	if opts.ComputeGB == 0 {
-		opts.ComputeGB = 0.5
+		// Ollama's own log on the calibration machine showed ~0.8 GB of
+		// compute buffers plus ~0.2 GB of recurrent state for a hybrid MoE;
+		// 0.5 GB let a "tight" verdict spill 11% to CPU in validation.
+		opts.ComputeGB = 1.0
 	}
 	perTok, err := KVBytesPerToken(m, opts.KV)
 	if err != nil {

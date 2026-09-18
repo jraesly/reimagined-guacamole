@@ -47,11 +47,26 @@ type event struct {
 	} `json:"choices"`
 }
 
+// hasOutput reports whether the event carries any generated text, including
+// reasoning/thinking tokens.
 func (e *event) hasOutput() bool {
+	if e.hasContent() {
+		return true
+	}
 	for _, c := range e.Choices {
-		if c.Delta != nil && ((c.Delta.Content != nil && *c.Delta.Content != "") ||
-			(c.Delta.Reasoning != nil && *c.Delta.Reasoning != "") ||
-			(c.Delta.Thinking != nil && *c.Delta.Thinking != "") || hasToolCalls(c.Delta.ToolCalls)) {
+		if c.Delta != nil && ((c.Delta.Reasoning != nil && *c.Delta.Reasoning != "") ||
+			(c.Delta.Thinking != nil && *c.Delta.Thinking != "")) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasContent reports whether the event carries visible answer content or a
+// tool call, i.e. something the harness acts on, as opposed to reasoning.
+func (e *event) hasContent() bool {
+	for _, c := range e.Choices {
+		if c.Delta != nil && ((c.Delta.Content != nil && *c.Delta.Content != "") || hasToolCalls(c.Delta.ToolCalls)) {
 			return true
 		}
 		if c.Message != nil && ((c.Message.Content != nil && *c.Message.Content != "") || hasToolCalls(c.Message.ToolCalls)) {
@@ -75,7 +90,8 @@ const maxLine = 1 << 20
 
 // Observation is what the response parser learned from a stream or body.
 type Observation struct {
-	FirstOutput   bool // set once the first content/tool delta was seen
+	FirstOutput   bool // set once any generated token (including reasoning) was seen
+	FirstContent  bool // set once visible content or a tool call was seen
 	Chunks        int  // SSE data events seen
 	Usage         *Usage
 	Timings       *Timings
@@ -100,10 +116,11 @@ func (o *Observation) absorb(e *event) {
 // stream: the proxy copies bytes to the client and calls Write with the same
 // bytes, so nothing the harness sees is altered.
 type sseScanner struct {
-	buf      bytes.Buffer
-	obs      *Observation
-	onFirst  func()
-	dropping bool // inside an oversized line: skip bytes until the next newline
+	buf            bytes.Buffer
+	obs            *Observation
+	onFirst        func() // first generated token of any kind
+	onFirstContent func() // first visible content or tool call
+	dropping       bool   // inside an oversized line: skip bytes until the next newline
 }
 
 // Write consumes a chunk of the SSE byte stream.
@@ -161,6 +178,12 @@ func (s *sseScanner) line(l string) {
 			s.onFirst()
 		}
 	}
+	if !s.obs.FirstContent && e.hasContent() {
+		s.obs.FirstContent = true
+		if s.onFirstContent != nil {
+			s.onFirstContent()
+		}
+	}
 }
 
 // parseBody handles a non-streaming JSON response.
@@ -172,5 +195,6 @@ func parseBody(body []byte, obs *Observation) {
 	}
 	obs.absorb(&e)
 	obs.FirstOutput = e.hasOutput()
+	obs.FirstContent = e.hasContent()
 	obs.Done = true
 }

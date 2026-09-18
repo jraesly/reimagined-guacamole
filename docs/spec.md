@@ -101,8 +101,9 @@ Default: counts, hashes, and redacted 80-char excerpts only. `--dump DIR` opts i
 
 ## Validation paths (both before release)
 - Mac (M1 Max, 32 GB): `fit` on the DavidAU Qwen 3.8 27B Q4_K_S already on disk must say `variant`, `16/64 layers hold KV`, fits at 64k, `no` at 256k. **Met on 2026-09-17**: the header's `full_attention_interval = 4` gives 65,536 KV bytes/token, and `fit`'s 16,384 MiB at 262k / 2,048 MiB at 32k match Ollama's server log to the MiB, which is why the 256k app default spilled 32 of 66 layers to CPU (0.35 tok/s) and 32k ran at 11.35 tok/s. `fit --measure` at 4k context recorded 13.1 tok/s for `qwen3.8:27b` and 53.2 tok/s for `qwen3.6:35b` (MoE, ~3.5B active), now used for calibrated estimates in place of the chip table. A live `capture` run through Ollama with a fake harness confirmed the accounting end to end: turn 1 showed 425 prompt tokens of which 390 were harness-added (tools `write_file` 123, `read_file` 111, `bash` 105), and turn 3, where the system prompt's timestamp changed, flagged `break: system[0].content@84 "…Current time: 22:41:|19"` with 12.3% wasted prefill for the session. The OpenCode → LM Studio path with `unsloth/Qwen3.8-27B-GGUF` UD-Q4_K_XL, and the Nemotron 4B that is slow today, are still to be run through `capture` for a full session report.
-- Linux/4090 (24 GB VRAM): `fit` must show the 27B Q4 fitting at 32k with `--reserve-gb 2` and the 125B Flash-Next as `no` at every context; then OpenCode → llama-server. **Pending** — not yet run.
-- Success: `fit`'s predicted fit/no-fit is confirmed by actually loading the model at that context on both machines, and on the ~50k-prefill machine the `capture` report names the harness-added tokens and the prefix break; the report is good enough to attach to an OpenCode issue as-is. Met on the Mac; the Linux/4090 half of this criterion is still open.
+- Mac, runtime check (2026-09-17): `scripts/validate-linux.sh` loaded each Ollama model at its predicted boundary contexts and read `ollama ps`. `qwen3.8:27b` at 64k (`yes`) → 100% GPU; at 128k (`no`) → 28%/72% CPU/GPU; `qwen3.6:35b` at 256k (`no`) → 27%/73%; at 128k (`tight`, 23.5 of 24 GB) → 11%/89% CPU/GPU, a miss that raised the compute reserve to 1 GB and added the "may still spill" note to every `tight` row. Record: `docs/validation/MacBookPro-20260917.json`. LM Studio measurement recorded the DavidAU variant at 10.1 tok/s and Nemotron 3 Nano 4B at 46.5 tok/s (4k context).
+- Linux/4090 (24 GB VRAM): `fit` must show the 27B Q4 fitting at 32k with `--reserve-gb 2` and the 125B Flash-Next as `no` at every context; then OpenCode → llama-server. **Pending** — `scripts/validate-linux.sh` is ready (dry run verified, nine failure scenarios covered by `scripts/validate_linux_test.py`); the box has not been run yet. See `docs/VALIDATION.md`.
+- Success: `fit`'s predicted fit/no-fit is confirmed by actually loading the model at that context on both machines, and on the ~50k-prefill machine the `capture` report names the harness-added tokens and the prefix break; the report is good enough to attach to an OpenCode issue as-is. Met on the Mac (3 of 4 verdicts, the fourth now documented as the meaning of `tight`); the Linux/4090 half of this criterion is still open.
 
 ## Implemented deviations from this spec
 
@@ -130,6 +131,21 @@ The shipped tool differs from this spec in a few places, all additive:
 - **`--json`/`--report` flags on `capture`**: NDJSON-per-turn-plus-summary
   and a Markdown session report are written via explicit flags rather than
   always-on output, so the live terminal view stays the default.
+- **LM Studio measurement**: `--measure` also drives LM Studio (`lms load
+  --context-length N --gpu max`, one `/api/v0/chat/completions`, `lms unload
+  --all`) and records `stats.tokens_per_second` as measured; skipped with a
+  hint when its server is off.
+- **AMD/ROCm detection**: Linux detection falls back from `nvidia-smi` to
+  `rocm-smi --json` and sysfs, with AMD bandwidth-table entries; untested on
+  AMD hardware.
+- **Time to first content**: `capture` records `ttfc_ms` (first visible
+  content or tool call) next to `ttft_ms` because Ollama's `/v1` endpoint
+  streams reasoning first and ignores `think: false`; the live line and
+  summary show the gap when it is material.
+- **Validation script**: `scripts/validate-linux.sh` (with a Python harness)
+  checks verdicts against `ollama ps`; the spec only asked for a manual load.
+- **Compute reserve** is 1.0 GB, not the spec's ~0.5 GB, after the validation
+  miss above.
 
 ## Tests
 - `fit` unit: GGUF header parser against synthetic fixture headers (dense, MoE, sharded, missing `n_head_kv`); KV and budget math with hand-checked expected values; baseline/variant classification; `models.yaml` schema (date, publisher allowlist, memory class) fails the build if stale >90 days.
@@ -144,7 +160,7 @@ The shipped tool differs from this spec in a few places, all additive:
 1. **Implemented.** `fit`: GGUF/MLX header readers, hardware detection, memory table, speed estimate, baseline check, `--suggest`, tests. Shipped alone first, as planned — useful by itself.
 2. **Implemented.** `capture`: proxy + streaming pass-through + timing + cancel.
 3. **Implemented.** Token accounting + prefix diff + live line + report + tests.
-4. **Partially implemented.** Backend telemetry (llama.cpp `timings`, LM Studio `stats`) is done and exercised by the Mac validation path below; the Linux/4090 validation path is still pending. README now carries a real `fit` table and a real `capture` session excerpt (see `README.md`) in place of a screenshot.
+4. **Implemented on the Mac; Linux pending.** Backend telemetry (llama.cpp `timings`, LM Studio `stats`) is done; the Mac validation path ran through `scripts/validate-linux.sh` with a recorded result; the Linux/4090 run is the one remaining item. README carries a real `fit` table and a real `capture` session excerpt in place of a screenshot.
 
 ## v0.2 candidates (only if people re-run it)
 `verify` (before/after a config change), `bench` (paired minimal vs captured request), `fit --hf org/repo` (read a Hugging Face config without downloading), Continue/Cline adapters, always-on mode with history.

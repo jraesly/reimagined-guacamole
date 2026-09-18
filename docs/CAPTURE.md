@@ -82,6 +82,17 @@ bearer headers, PEM private keys) masked before the write.
    figures above are inferred from request text, not confirmed by the
    server.
 
+## Thinking models: TTFT versus first content
+
+`ttft_ms` is the first generated token of any kind. Ollama's `/v1` endpoint
+streams a thinking model's reasoning as `reasoning` deltas before any visible
+content and ignores `think: false` there, so for those models TTFT is the
+first *reasoning* token. probe therefore also records `ttfc_ms`, the first
+visible content or tool call (observed). The live line adds `first content Xs`
+when it trails TTFT by more than 1.5× and 100 ms, and the summary states how
+many turns spent that gap on reasoning — time the user waited that prefill
+share does not count. Non-streaming responses have `ttfc_ms == total_ms`.
+
 ## Known limits
 
 - **No tokenizer.** Only the upstream's own `usage.prompt_tokens` (when

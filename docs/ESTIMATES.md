@@ -47,14 +47,24 @@ token, not a measurement of execution.
 - **Model maximum context**: `{arch}.context_length` is read and any table row
   beyond it is annotated, since a server defaulting to the model maximum is
   exactly how a 27B model ended up spilling to CPU on a 32 GB machine.
-- **Compute buffer**: `Options.ComputeGB`, default `0.5` GB of scratch space on
-  top of weights and KV.
+- **Compute buffer**: `Options.ComputeGB`, default `1.0` GB on top of weights
+  and KV. Ollama's log on the calibration machine showed ~0.8 GB of compute
+  buffers plus ~0.2 GB of recurrent state for a hybrid MoE; the earlier 0.5 GB
+  default let a `tight` verdict spill 11% to CPU in validation.
 - **Budget** (hw.go:Budget): unified memory takes the smaller of
   `RAM − reserve` and the wired limit (`iogpu.wired_limit_mb`, or 75% of RAM by
   default). Discrete GPUs take `VRAM − reserve`. CPU-only Linux takes
-  `RAM − reserve`. Default reserve is 8 GB unified, 2 GB discrete.
+  `RAM − reserve`. Default reserve is 8 GB unified, 2 GB discrete. On Linux
+  the GPU is found via `nvidia-smi`, else `rocm-smi --showmeminfo vram
+  --showproductname --json`, else sysfs (`mem_info_vram_total`, `product_name`,
+  vendor `0x1002`); AMD parts have bandwidth-table entries but have not been
+  validated on hardware, and llama.cpp/Ollama need a ROCm (HIP) build for
+  offload.
 - **Verdict** (fit.go:Classify): `total ≤ 0.9 × budget` → `yes`; `≤ budget` →
-  `tight` (within 10%); otherwise `no`. Total is `weights + KV + compute`.
+  `tight` (within 10%; runtime buffers beyond the compute reserve are not
+  modeled, so it may still spill); otherwise `no`. Total is
+  `weights + KV + compute`. `docs/VALIDATION.md` shows how verdicts are
+  checked against a real runtime.
 
 ## Speed
 
@@ -82,7 +92,12 @@ token, not a measurement of execution.
   `low` MoE.
 - **`fit --measure` calibration** (calib.go): each measured run records
   `bytes_per_token` and `tok_per_sec`; `effective GB/s =
-  bytes_per_token / 1e9 × tok_per_sec`. `File.Effective` returns the *median*
+  bytes_per_token / 1e9 × tok_per_sec`. Ollama models are measured through
+  `/api/generate` (thinking disabled, `keep_alive` 0); LM Studio models
+  through `lms load <id> --context-length N --gpu max`, one non-streaming
+  `/api/v0/chat/completions` whose `stats.tokens_per_second` is the measured
+  rate, then `lms unload --all`. Samples record their backend and the host's
+  aliases for the same weights so one run never counts twice. `File.Effective` returns the *median*
   across samples of a kind. `Estimate` uses the calibration whenever the kind has
   at least one sample (tok/s = `eff / (bytes_per_token / 1e9)`), even if the
   bandwidth table is empty; otherwise it falls back to the table. Calibrated

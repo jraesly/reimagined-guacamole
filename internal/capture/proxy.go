@@ -467,8 +467,11 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") || preq.Stream
 
 	obs := &Observation{}
-	var ttft time.Duration
-	scanner := &sseScanner{obs: obs, onFirst: func() { ttft = time.Since(monoStart) }}
+	var ttft, ttfc time.Duration
+	scanner := &sseScanner{obs: obs,
+		onFirst:        func() { ttft = time.Since(monoStart) },
+		onFirstContent: func() { ttfc = time.Since(monoStart) },
+	}
 
 	var head []byte
 	captureHead := func(chunk []byte) {
@@ -508,6 +511,13 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isSSE {
 		parseBody(respBuf.Bytes(), obs)
+		if obs.FirstContent {
+			ttfc = total
+		}
+	}
+	if obs.FirstContent && ttfc > 0 {
+		v := Value{float64(ttfc.Milliseconds()), model.Observed}
+		turn.TTFCms = &v
 	}
 
 	switch {

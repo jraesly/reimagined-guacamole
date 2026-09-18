@@ -1,0 +1,54 @@
+{
+  "hardware": {
+    "OS": "darwin",
+    "Chip": "Apple M1 Max",
+    "RAMGB": 32,
+    "VRAMGB": 0,
+    "Unified": true,
+    "WiredLimitGB": 0,
+    "BandwidthGBs": 400,
+    "BandwidthKnown": true,
+    "Notes": null
+  },
+  "uname": "Darwin MacBookPro 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64\n",
+  "gpu_tool": "unavailable",
+  "gpu_output": "GPU diagnostic command unavailable or failed\n",
+  "results": [
+    {
+      "model": "qwen3.6:35b",
+      "ctx": 131072,
+      "predicted": "tight",
+      "observed_processor": "11%/89% CPU/GPU",
+      "tok_s": 31.495319008212405,
+      "result": "FAIL",
+      "detail": "predicted fit, observed CPU offload"
+    },
+    {
+      "model": "qwen3.6:35b",
+      "ctx": 262144,
+      "predicted": "no",
+      "observed_processor": "27%/73% CPU/GPU",
+      "tok_s": 10.204485126325148,
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "model": "qwen3.8:27b",
+      "ctx": 65536,
+      "predicted": "yes",
+      "observed_processor": "100% GPU",
+      "tok_s": 14.187516404315842,
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "model": "qwen3.8:27b",
+      "ctx": 131072,
+      "predicted": "no",
+      "observed_processor": "28%/72% CPU/GPU",
+      "tok_s": 7.912456580394515,
+      "result": "PASS",
+      "detail": ""
+    }
+  ]
+}

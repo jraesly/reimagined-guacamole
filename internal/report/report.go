@@ -173,6 +173,12 @@ func WriteText(w io.Writer, r Report) {
 			fmt.Fprintf(tw, "  %s\t%.1f\t%.1f\t%s\t%s\n", ctxLabel(row.Context), row.KVGB, row.TotalGB, row.Verdict, row.Note)
 		}
 		tw.Flush()
+		for _, row := range m.Rows {
+			if row.Verdict == fit.Tight {
+				fmt.Fprintf(w, "  %s\n", fit.TightNote)
+				break
+			}
+		}
 		if m.MaxContext > 0 {
 			fmt.Fprintf(w, "  max context that fits: %s (KV per token %.0f bytes, inferred from header)\n", ctxLabel(m.MaxContext), m.KVBytesPerTok.Value)
 		} else {

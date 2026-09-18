@@ -36,6 +36,9 @@ type Result struct {
 	LoadSeconds      float64
 	TotalSeconds     float64
 	ThinkingDisabled bool
+	TTFTSeconds      float64
+	Runtime          string
+	Notes            []string
 }
 
 // OllamaAvailable reports whether the local API answers.

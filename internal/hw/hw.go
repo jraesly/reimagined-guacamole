@@ -42,7 +42,8 @@ func Detect() (Info, error) {
 			return Info{}, err
 		}
 		smi, _ := runOut("nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits")
-		return ParseLinux(meminfo, smi)
+		rocm, _ := runOut("rocm-smi", "--showmeminfo", "vram", "--showproductname", "--json")
+		return ParseLinuxWithAMD(meminfo, smi, rocm, readSysfsCards())
 	}
 	return Info{}, fmt.Errorf("unsupported OS %s", runtime.GOOS)
 }
@@ -86,7 +87,7 @@ func ParseLinux(meminfo, nvidiaSMI string) (Info, error) {
 	}
 	line := strings.TrimSpace(strings.Split(strings.TrimSpace(nvidiaSMI), "\n")[0])
 	if line == "" {
-		in.Notes = append(in.Notes, "no NVIDIA GPU detected (nvidia-smi absent or empty); CPU-only fit uses system RAM")
+		in.Notes = append(in.Notes, "no supported GPU detected; CPU-only fit uses system RAM")
 		in.Chip = "cpu"
 		return in, nil
 	}
@@ -170,7 +171,11 @@ var bandwidthTable = []struct {
 	{"RTX 3090 Ti", 1008}, {"RTX 3090", 936}, {"RTX 3080 Ti", 912}, {"RTX 3080", 760}, {"RTX 3070", 448},
 	{"RTX 6000 Ada", 960}, {"RTX A6000", 768}, {"L40S", 864}, {"L40", 864}, {"L4", 300},
 	{"A100", 1935}, {"H100", 3350}, {"H200", 4800},
-	{"RX 7900 XTX", 960}, {"RX 7900 XT", 800}, {"MI300X", 5300},
+	{"RX 7900 XTX", 960}, {"RX 7900 XT", 800}, {"RX 7900 GRE", 576},
+	{"RX 7800 XT", 624}, {"RX 7700 XT", 432}, {"RX 6950 XT", 576},
+	{"RX 6900 XT", 512}, {"RX 6800 XT", 512},
+	{"W7900", 864}, {"W7800", 576},
+	{"MI300X", 5300}, {"MI250X", 3277}, {"MI210", 1638}, {"MI100", 1229},
 }
 
 // Bandwidth looks up memory bandwidth by chip name.

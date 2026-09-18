@@ -130,3 +130,85 @@ func TestBandwidthSpecificityOrder(t *testing.T) {
 		t.Error("unknown chip should be !ok")
 	}
 }
+
+func TestBandwidthAMD(t *testing.T) {
+	for _, tc := range []struct {
+		chip string
+		want float64
+	}{
+		{"Navi 31 [Radeon RX 7900 XTX]", 960}, {"radeon rx 7900 xt", 800},
+		{"RX 7900 GRE", 576}, {"RX 7800 XT", 624}, {"RX 7700 XT", 432},
+		{"RX 6950 XT", 576}, {"RX 6900 XT", 512}, {"RX 6800 XT", 512},
+		{"Radeon PRO W7900", 864}, {"Radeon PRO W7800", 576},
+		{"AMD Instinct MI300X", 5300}, {"MI250X", 3277}, {"MI210", 1638}, {"MI100", 1229},
+	} {
+		t.Run(tc.chip, func(t *testing.T) {
+			if got, known := Bandwidth(tc.chip); !known || got != tc.want {
+				t.Fatalf("got %v, %v; want %v", got, known, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAMD(t *testing.T) {
+	const rocm = `{"card0":{"VRAM Total Memory (B)":"25753026560","VRAM Total Used Memory (B)":"123","Card Series":"Navi 31 [Radeon RX 7900 XTX]","Card Model":"0x744c"}}`
+	fallback := []SysfsCard{{Card: "card0", VRAMTotalBytes: "17179869184\n", Vendor: "0x1002\n"}}
+	for _, tc := range []struct {
+		name, raw       string
+		cards           []SysfsCard
+		chip            string
+		vram, bandwidth float64
+		note            string
+	}{
+		{"rocm", rocm, fallback, "Navi 31 [Radeon RX 7900 XTX]", 23.984375, 960, "ROCm (HIP)"},
+		{"sysfs_unknown", "", fallback, "AMD GPU (card0)", 16, 0, "not in the table"},
+		{"malformed_fallback", "{broken", fallback, "AMD GPU (card0)", 16, 0, "ROCm (HIP)"},
+		{"version_keys", `{"card0":{"vram total memory (bytes)":25769803776,"DEVICE NAME":"RX 7900 XTX"}}`, nil, "RX 7900 XTX", 24, 960, "full offload"},
+		{"model_key", `{"card0":{"VRAM Total Memory":"17179869184","card model":"RX 6800 XT"}}`, nil, "RX 6800 XT", 16, 512, "full offload"},
+		{"multi_rocm", `{"card1":{"VRAM Total Memory (B)":"17179869184","Card Series":"RX 6800 XT"},"card0":{"VRAM Total Memory (B)":"25769803776","Card Series":"RX 7900 XTX"}}`, nil, "RX 7900 XTX", 24, 960, "multiple GPUs"},
+		{"multi_sysfs", "", append(append([]SysfsCard{}, fallback...), SysfsCard{Card: "card1", VRAMTotalBytes: "8589934592", Vendor: "0x1002"}), "AMD GPU (card0)", 16, 0, "multiple GPUs"},
+		{"pci_vendor", "", []SysfsCard{{Card: "card0", VRAMTotalBytes: "17179869184", Vendor: "PCI_ID=1002:744C"}}, "AMD GPU (card0)", 16, 0, "full offload"},
+		{"sysfs_product", "", []SysfsCard{{Card: "card0", VRAMTotalBytes: "17179869184", ProductName: "RX 6800 XT", Vendor: "0x1002"}}, "RX 6800 XT", 16, 512, "full offload"},
+		{"invalid_vram", "", []SysfsCard{{Card: "card0", VRAMTotalBytes: "-1", Vendor: "0x1002"}}, "", 0, 0, ""},
+		{"non_amd", "", []SysfsCard{{Card: "card0", VRAMTotalBytes: "17179869184", Vendor: "0x10de"}}, "", 0, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseAMD(tc.raw, tc.cards)
+			if got.Chip != tc.chip || math.Abs(got.VRAMGB-tc.vram) > 0.000001 || got.BandwidthGBs != tc.bandwidth || got.BandwidthKnown != (tc.bandwidth > 0) || got.Unified {
+				t.Fatalf("got %+v", got)
+			}
+			if tc.note != "" && !strings.Contains(strings.Join(got.Notes, " "), tc.note) {
+				t.Fatalf("missing note %q: %v", tc.note, got.Notes)
+			}
+			if tc.vram > 0 {
+				if b := got.Budget(2); b.GB != tc.vram-2 || b.Binding != "vram" {
+					t.Fatalf("budget: %+v", b)
+				}
+			}
+		})
+	}
+}
+
+func TestParseLinuxAMDPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name, nvidia, rocm, chip string
+		vram                     float64
+	}{
+		{"nvidia", "NVIDIA GeForce RTX 4090, 24576", `{"card0":{"VRAM Total Memory":"17179869184","Card Series":"RX 6800 XT"}}`, "NVIDIA GeForce RTX 4090", 24},
+		{"rocm", "", `{"card0":{"VRAM Total Memory":"17179869184","Card Series":"RX 6800 XT"}}`, "RX 6800 XT", 16},
+		{"sysfs", "", "bad json", "AMD GPU (card0)", 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseLinuxWithAMD("MemTotal: 33554432 kB", tc.nvidia, tc.rocm, []SysfsCard{{Card: "card0", VRAMTotalBytes: "8589934592", Vendor: "0x1002"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Chip != tc.chip || got.VRAMGB != tc.vram || got.RAMGB != 32 || got.OS != "linux" {
+				t.Fatalf("got %+v", got)
+			}
+			if strings.Contains(strings.Join(got.Notes, " "), "CPU-only") {
+				t.Fatal(got.Notes)
+			}
+		})
+	}
+}

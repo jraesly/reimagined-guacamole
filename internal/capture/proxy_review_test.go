@@ -15,6 +15,57 @@ import (
 	"time"
 )
 
+func TestFirstContentTimedSeparatelyFromReasoning(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":\"thinking\"}}]}\n\n")
+		f.Flush()
+		time.Sleep(250 * time.Millisecond)
+		_, _ = io.WriteString(w, sseChunk("answer")+"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
+		f.Flush()
+	}))
+	defer up.Close()
+	onTurn, wait := waitForTurn(t)
+	p := newProxy(t, up, "/v1", Options{OnTurn: onTurn})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", bytes.NewReader(chatBody("m", true, "")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	turn := wait()
+	if turn.TTFCms == nil {
+		t.Fatal("TTFC not recorded")
+	}
+	if turn.TTFCms.Value < turn.TTFTms.Value+150 {
+		t.Errorf("ttfc %.0f ms should trail ttft %.0f ms by the reasoning delay", turn.TTFCms.Value, turn.TTFTms.Value)
+	}
+	if !strings.Contains(LiveLine(turn), "first content") {
+		t.Errorf("live line should show first content: %s", LiveLine(turn))
+	}
+	// Non-streaming: content arrives with the whole body, so TTFC == total.
+	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"x"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+	}))
+	defer up2.Close()
+	onTurn2, wait2 := waitForTurn(t)
+	p2 := newProxy(t, up2, "/v1", Options{OnTurn: onTurn2})
+	srv2 := httptest.NewServer(p2)
+	defer srv2.Close()
+	resp, _ = http.Post(srv2.URL+"/v1/chat/completions", "application/json", bytes.NewReader(chatBody("m", false, "")))
+	resp.Body.Close()
+	t2 := wait2()
+	if t2.TTFCms == nil || t2.TTFCms.Value != t2.TotalMs.Value {
+		t.Errorf("non-streaming ttfc = %+v, total = %v", t2.TTFCms, t2.TotalMs.Value)
+	}
+	if strings.Contains(LiveLine(t2), "first content") {
+		t.Errorf("live line should not show first content when it equals ttft: %s", LiveLine(t2))
+	}
+}
+
 func TestNullStreamOptionsDoesNotPanic(t *testing.T) {
 	var seen []byte
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

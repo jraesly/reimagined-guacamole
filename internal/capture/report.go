@@ -48,10 +48,13 @@ func LiveLine(t Turn) string {
 	} else {
 		parts = append(parts, fmt.Sprintf("re-prefilled %s (%s)", commas(t.ReprefilledTokens.Value), srcAbbrev(t.ReprefilledTokens.Source)))
 	}
-	parts = append(parts,
-		fmt.Sprintf("ttft %s", formatDuration(t.TTFTms.Value)),
-		fmt.Sprintf("prefill %d%%", int(math.Round(t.PrefillShare.Value*100))),
-	)
+	parts = append(parts, fmt.Sprintf("ttft %s", formatDuration(t.TTFTms.Value)))
+	// For thinking models the first token is reasoning; show when the first
+	// visible content arrived materially later.
+	if t.TTFCms != nil && t.TTFCms.Value > t.TTFTms.Value*1.5 && t.TTFCms.Value-t.TTFTms.Value > 100 {
+		parts = append(parts, fmt.Sprintf("first content %s", formatDuration(t.TTFCms.Value)))
+	}
+	parts = append(parts, fmt.Sprintf("prefill %d%%", int(math.Round(t.PrefillShare.Value*100))))
 	if !t.FirstTurn {
 		if t.PrefixBreak != nil {
 			br := t.PrefixBreak
@@ -205,6 +208,9 @@ type summary struct {
 	prefillP90Pct     int
 	reprefilledMedian float64
 	brokenCount       int
+	ttftMedianMs      float64
+	ttfcMedianMs      float64 // 0 when no turn recorded visible content
+	reasoningTurns    int     // turns whose first visible content trailed the first token
 
 	// harness-added tokens
 	medianSystemTokens float64
@@ -225,6 +231,17 @@ type summary struct {
 	// environment
 	env              Env
 	usageInjectedAny bool
+}
+
+// firstContentLine explains the gap between the first token and the first
+// visible content when a thinking model spent it on reasoning; empty when
+// there is nothing to say.
+func (s summary) firstContentLine() string {
+	if s.reasoningTurns == 0 {
+		return ""
+	}
+	return fmt.Sprintf("First visible content arrived at %s (median) versus first token at %s: %d of %d turns spent the difference on reasoning tokens, which prefill share does not count as waiting.",
+		formatDuration(s.ttfcMedianMs), formatDuration(s.ttftMedianMs), s.reasoningTurns, s.turnCount)
 }
 
 func buildSummary(turns []Turn, env Env) summary {
@@ -248,13 +265,20 @@ func buildSummary(turns []Turn, env Env) summary {
 		}
 	}
 
-	var prefillShares, reprefilled, promptTokens, systemTokens, toolsTokens []float64
+	var prefillShares, reprefilled, promptTokens, systemTokens, toolsTokens, ttfts, ttfcs []float64
 	toolMax := map[string]float64{}
 	breakBySeg := map[string]*breakGroup{}
 	var breakOrder []string
 
 	for _, t := range turns {
 		prefillShares = append(prefillShares, t.PrefillShare.Value*100)
+		ttfts = append(ttfts, t.TTFTms.Value)
+		if t.TTFCms != nil {
+			ttfcs = append(ttfcs, t.TTFCms.Value)
+			if t.TTFCms.Value > t.TTFTms.Value*1.5 && t.TTFCms.Value-t.TTFTms.Value > 100 {
+				s.reasoningTurns++
+			}
+		}
 		promptTokens = append(promptTokens, t.PromptTokens.Value)
 		systemTokens = append(systemTokens, t.SystemTokens.Value)
 		toolsTokens = append(toolsTokens, t.ToolsTokens.Value)
@@ -288,6 +312,8 @@ func buildSummary(turns []Turn, env Env) summary {
 		s.prefillP90Pct = int(math.Round(percentile(sortedCopy(prefillShares), 90)))
 	}
 	s.reprefilledMedian = median(reprefilled)
+	s.ttftMedianMs = median(ttfts)
+	s.ttfcMedianMs = median(ttfcs)
 	s.medianSystemTokens = median(systemTokens)
 	s.medianToolsTokens = median(toolsTokens)
 
@@ -381,6 +407,9 @@ func WriteSummary(w io.Writer, turns []Turn, env Env) {
 			s.prefillMedianPct, s.prefillP90Pct, commas(s.reprefilledMedian), s.turnCount)
 		fmt.Fprintf(w, "%d of %d turns broke the prompt prefix.\n", s.brokenCount, s.turnCount)
 	}
+	if line := s.firstContentLine(); line != "" {
+		fmt.Fprintln(w, line)
+	}
 
 	fmt.Fprintln(w, "\nHarness-added tokens")
 	fmt.Fprintf(w, "  system tokens (median): %s\n  tools tokens (median): %s\n", commas(s.medianSystemTokens), commas(s.medianToolsTokens))
@@ -463,6 +492,9 @@ func WriteMarkdown(w io.Writer, turns []Turn, env Env) {
 	} else {
 		fmt.Fprintf(w, "Prefill was %d%% of turn latency (median; p90 %d%%) and the harness re-prefilled %s tokens per turn (median) across %d turns. %d of %d turns broke the prompt prefix.\n",
 			s.prefillMedianPct, s.prefillP90Pct, commas(s.reprefilledMedian), s.turnCount, s.brokenCount, s.turnCount)
+	}
+	if line := s.firstContentLine(); line != "" {
+		fmt.Fprintln(w, line)
 	}
 
 	fmt.Fprintln(w, "\n## Harness-added tokens")

@@ -189,24 +189,40 @@ prefix diff, live line, session report). See `docs/spec.md` for what's left
 `docs/spec.md#implemented-deviations-from-this-spec` for where the shipped
 tool differs from the original plan.
 
+Validated so far: on this M1 Max, `scripts/validate-linux.sh` loaded each
+Ollama model at its predicted boundary contexts and checked `ollama ps`; 3 of
+4 verdicts held, and the miss (a `tight` verdict that spilled 11% to CPU)
+raised the compute reserve to 1 GB and put a warning on every `tight` row.
+See `docs/VALIDATION.md`; the RTX 4090 Linux run is still pending.
+
+`fit --measure` calibrates against installed **Ollama** and **LM Studio**
+models (LM Studio through `lms load` and its `/api/v0` stats; start its server
+with `lms server start` first). Measured here at 4k context: qwen3.8:27b
+12.5 tok/s (Ollama), the DavidAU 27B variant 10.1 tok/s (LM Studio), Nemotron
+3 Nano 4B 46.5 tok/s (LM Studio), qwen3.6:35b MoE 52.9 tok/s (Ollama).
+
 Known limitations:
 
 - Architectures with multi-head latent attention (DeepSeek-style
   `kv_lora_rank`) or sliding-window/shared-KV caps are tagged and warned
   about, but the KV figure is an **upper bound** — a `no` verdict for these
   may be pessimistic.
-- AMD/ROCm GPUs are not detected or modeled; only macOS Metal and
-  NVIDIA/`nvidia-smi` are.
-- `fit --measure` calibrates against installed **Ollama** models only; LM
-  Studio cannot be measured this way yet.
+- A `tight` verdict means within 10% of the budget; runtime buffers are not
+  modeled beyond a 1 GB reserve, so it may still spill.
+- AMD/ROCm GPUs are detected on Linux (`rocm-smi`, then sysfs) and have
+  bandwidth-table entries, but nothing has been validated on AMD hardware.
+- For thinking models served by Ollama's `/v1` endpoint, `capture`'s TTFT is
+  the first *reasoning* token (Ollama ignores `think: false` there). probe
+  also records time-to-first-content and shows it when it trails materially.
 - The `--suggest` list is curated, not benchmarked by probe — it's a dated
   pointer to baseline models, not a ranking.
 - The chip bandwidth table (used when no calibration exists) covers a fixed
   set of chips and GPUs at a single bin; unlisted hardware needs
-  `--bandwidth-gb-s` or gets no speed estimate at all.
+  `--bandwidth-gb-s`, or `fit --measure` once, to get a speed estimate.
 
 ## Further reading
 
 - `docs/spec.md` — the v0.1 spec and what's implemented against it.
 - `docs/ESTIMATES.md` — exactly how `fit` computes every number.
 - `docs/CAPTURE.md` — exactly how `capture` computes and labels every figure.
+- `docs/VALIDATION.md` — checking `fit`'s verdicts against a real runtime.

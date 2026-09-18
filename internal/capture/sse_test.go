@@ -87,6 +87,31 @@ func TestSSEScannerIgnoresNonDataLinesAndBadJSON(t *testing.T) {
 	}
 }
 
+func TestSSEScannerFirstContentFollowsReasoning(t *testing.T) {
+	obs := &Observation{}
+	var events []string
+	s := &sseScanner{obs: obs,
+		onFirst:        func() { events = append(events, "first") },
+		onFirstContent: func() { events = append(events, "content") },
+	}
+	_, _ = s.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":\"hmm\"}}]}\n"))
+	if !obs.FirstOutput || obs.FirstContent {
+		t.Fatalf("after reasoning: output=%v content=%v", obs.FirstOutput, obs.FirstContent)
+	}
+	_, _ = s.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":\"more\"}}]}\n"))
+	_, _ = s.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"def\"}}]}\n"))
+	if !obs.FirstContent || len(events) != 2 || events[0] != "first" || events[1] != "content" {
+		t.Errorf("events = %v content=%v", events, obs.FirstContent)
+	}
+	// Tool calls are content too.
+	o2 := &Observation{}
+	s2 := &sseScanner{obs: o2}
+	_, _ = s2.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0}]}}]}\n"))
+	if !o2.FirstContent {
+		t.Error("tool call should count as first content")
+	}
+}
+
 func TestSSEScannerOllamaReasoningKeyIsOutput(t *testing.T) {
 	// Ollama's OpenAI-compatible endpoint streams thinking as "reasoning"
 	// with an empty "content"; a role-only first chunk must not count.

@@ -119,24 +119,78 @@ func runFit(args []string) error {
 	if cal.Chip == "" {
 		cal.Chip = info.Chip
 	}
-	if *doMeasure && !measure.OllamaAvailable(context.Background()) {
-		return fmt.Errorf("--measure needs the Ollama API at %s; start Ollama or omit --measure", measure.OllamaBase)
+	var ollamaAvailable, lmstudioAvailable bool
+	if *doMeasure {
+		checkCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ollamaAvailable = measure.OllamaAvailable(checkCtx)
+		cancel()
+		checkCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		lmstudioAvailable = measure.LMStudioAvailable(checkCtx)
+		cancel()
+		if !lmstudioAvailable {
+			fmt.Fprintln(os.Stderr, "--measure: LM Studio API unavailable; run `lms server start`; skipping LM Studio targets")
+		}
+		if !ollamaAvailable && !lmstudioAvailable {
+			return fmt.Errorf("--measure needs the Ollama API at %s; start Ollama or omit --measure", measure.OllamaBase)
+		}
 	}
-	measureOne := func(m *model.Model, t scan.Found) {
+	measureOne := func(m *model.Model, t scan.Found) bool {
 		name := firstName(t)
-		fmt.Fprintf(os.Stderr, "measuring %s at %dk context, %d tokens (Ollama loads the model; this can take a minute)…", name, *measureCtx/1024, *measureTokens)
+		backend, label := "ollama", "Ollama"
+		sampleAliases := aliases(t)
 		mctx, cancel := context.WithTimeout(context.Background(), measure.Timeout)
 		defer cancel()
-		res, err := measure.Ollama(mctx, name, *measureCtx, *measureTokens)
+		id := name
+		if t.Source == "lmstudio" {
+			if !lmstudioAvailable {
+				return false
+			}
+			backend, label = "lmstudio", "LM Studio"
+			owner, repo, ok := strings.Cut(name, "/")
+			if !ok || owner == "" || repo == "" {
+				fmt.Fprintf(os.Stderr, "--measure: skipping %s: missing LM Studio owner/repo name\n", name)
+				return false
+			}
+			models, err := measure.LMStudioModels(mctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "--measure: skipping %s: %v\n", name, err)
+				return false
+			}
+			matched, ok := measure.MatchLMStudio(models, owner, repo)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "--measure: skipping %s: no matching LM Studio generation model\n", name)
+				return false
+			}
+			id = matched.ID
+			sampleAliases = []string{id}
+		} else if !ollamaAvailable {
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "measuring %s at %dk context, %d tokens (%s loads the model; this can take a minute)…", name, *measureCtx/1024, *measureTokens, label)
+		var res measure.Result
+		var err error
+		if backend == "lmstudio" {
+			res, err = measure.LMStudio(mctx, id, *measureCtx, *measureTokens, nil)
+		} else {
+			res, err = measure.Ollama(mctx, name, *measureCtx, *measureTokens)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, " failed: %v\n", err)
-			return
+			return false
 		}
 		bpt, _ := m.BytesPerToken()
-		cal.Add(calib.Sample{Model: name, Aliases: aliases(t), Kind: fit.Kind(m), Backend: "ollama", TokPerSec: res.TokPerSec,
+		cal.Add(calib.Sample{Model: name, Aliases: sampleAliases, Kind: fit.Kind(m), Backend: backend, TokPerSec: res.TokPerSec,
 			PromptTokSec: res.PromptTokPerSec, BytesPerToken: bpt, Context: res.Context, OutputTokens: res.OutputTokens,
 			MeasuredAt: time.Now().UTC()})
-		fmt.Fprintf(os.Stderr, " %.1f tok/s decode, %.0f tok/s prompt, load %.0fs\n", res.TokPerSec, res.PromptTokPerSec, res.LoadSeconds)
+		if backend == "lmstudio" {
+			fmt.Fprintf(os.Stderr, " %.1f tok/s decode (measured), TTFT %.2fs, generation %.2fs, runtime %s\n", res.TokPerSec, res.TTFTSeconds, res.TotalSeconds, res.Runtime)
+			for _, note := range res.Notes {
+				fmt.Fprintf(os.Stderr, "--measure: %s: %s\n", name, note)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, " %.1f tok/s decode, %.0f tok/s prompt, load %.0fs\n", res.TokPerSec, res.PromptTokPerSec, res.LoadSeconds)
+		}
+		return true
 	}
 
 	var local []string
@@ -197,9 +251,10 @@ func runFit(args []string) error {
 	measured := 0
 	if *doMeasure {
 		for _, l := range locals {
-			if l.err == nil && l.found.Source == "ollama" {
-				measureOne(l.m, l.found)
-				measured++
+			if l.err == nil && (l.found.Source == "ollama" || l.found.Source == "lmstudio") {
+				if measureOne(l.m, l.found) {
+					measured++
+				}
 			}
 		}
 	}
@@ -212,7 +267,7 @@ func runFit(args []string) error {
 	}
 	if *doMeasure {
 		if measured == 0 {
-			fmt.Fprintln(os.Stderr, "--measure: no installed Ollama models among the targets; nothing measured")
+			fmt.Fprintln(os.Stderr, "--measure: no target models successfully measured")
 		} else if err := cal.Save(*calibPath); err != nil {
 			return fmt.Errorf("saving calibration: %w", err)
 		} else {

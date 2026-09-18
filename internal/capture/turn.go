@@ -38,8 +38,11 @@ type Turn struct {
 	ReprefilledTokens Value  `json:"reprefilled_tokens"` // inferred: prompt tokens beyond the shared prefix
 	PrefixBreak       *Break `json:"prefix_break,omitempty"`
 
-	// Timing observed by probe's clock.
+	// Timing observed by probe's clock. TTFT is the first generated token of
+	// any kind; for thinking models that is a reasoning token, so TTFC (first
+	// visible content or tool call) is what the user actually waits for.
 	TTFTms       Value  `json:"ttft_ms"`
+	TTFCms       *Value `json:"ttfc_ms,omitempty"` // absent when no content ever arrived
 	DecodeMs     Value  `json:"decode_ms"`
 	TotalMs      Value  `json:"total_ms"`
 	PrefillShare Value  `json:"prefill_share"`           // ttft / total

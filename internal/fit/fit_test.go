@@ -101,9 +101,9 @@ func TestTableM1Max32GB(t *testing.T) {
 	if got, _ := MaxContext(rows); got != 65536 {
 		t.Errorf("max context = %d", got)
 	}
-	// 256k must be a clear no: 15.8 + 16 + 0.5 GB on a 24 GB budget.
+	// 256k must be a clear no: 15.7 + 16 + 1.0 GB on a 24 GB budget.
 	rows, _ = Table(qwen38(), 24, Options{Contexts: []uint64{262144}})
-	if rows[0].Verdict != No || !approx(rows[0].TotalGB, 32.3, 0.2) {
+	if rows[0].Verdict != No || !approx(rows[0].TotalGB, 32.8, 0.2) {
 		t.Errorf("262k: %+v", rows[0])
 	}
 }
